@@ -28,8 +28,7 @@ class SendLogsJob implements ShouldQueue
 
     public int $timeout = 30;
 
-    /** Owlogs ingestion endpoint (SaaS). */
-    private const INGEST_URL = 'https://www.owlogs.com/api/owlogs/ingest';
+    private const DEFAULT_INGEST_URL = 'https://www.owlogs.com/api/owlogs/ingest';
 
     /** @var list<int> backoff in seconds between retries */
     public array $backoff = [2, 5, 15, 60, 180];
@@ -57,16 +56,28 @@ class SendLogsJob implements ShouldQueue
         }
 
         $timeout = (int) config('owlogs.transport.timeout_s', 30);
+        $compression = (bool) config('owlogs.transport.compression', true);
+        $url = (string) (config('owlogs.transport.ingest_url') ?: self::DEFAULT_INGEST_URL);
+
+        $headers = [
+            'X-Api-Key' => $apiKey,
+            'Accept' => 'application/json',
+            'Content-Type' => 'application/json',
+            'User-Agent' => 'owlogs-agent/1.0',
+        ];
+
+        $body = json_encode(['logs' => $this->logs], JSON_UNESCAPED_UNICODE);
+
+        if ($compression && $body !== false) {
+            $body = gzencode($body, 6);
+            $headers['Content-Encoding'] = 'gzip';
+        }
 
         try {
-            $response = Http::withHeaders([
-                'X-Api-Key' => $apiKey,
-                'Accept' => 'application/json',
-                'User-Agent' => 'owlogs-agent/1.0',
-            ])
+            $response = Http::withHeaders($headers)
                 ->timeout($timeout)
-                ->asJson()
-                ->post(self::INGEST_URL, ['logs' => $this->logs]);
+                ->withBody($body, 'application/json')
+                ->post($url);
 
             if ($response->successful()) {
                 return;

@@ -29,15 +29,26 @@ return [
     | Transport
     |--------------------------------------------------------------------------
     |
-    | batch_size: how many buffered log rows trigger a flush.
-    | queue:      queue name for the SendLogsJob.
-    | connection: queue connection (null = default app connection).
-    | timeout_s:  HTTP timeout when the job POSTs to the server.
+    | batch_size:            how many buffered log rows trigger a flush.
+    | max_payload_bytes:     soft cap on the JSON payload size; when exceeded,
+    |                        a flush is triggered (and the batch is split into
+    |                        chunks if a single flush would exceed it).
+    | min_flush_interval_ms: minimum delay between two soft-triggered flushes
+    |                        (batch_size / max_payload_bytes). Shutdown and
+    |                        Queue::after always force a flush.
+    | compression:           gzip the request body before sending.
+    | queue:                 queue name for the SendLogsJob.
+    | connection:            queue connection (null = default app connection).
+    | timeout_s:             HTTP timeout when the job POSTs to the server.
     |
     */
 
     'transport' => [
+        'ingest_url' => env('OWLOGS_INGEST_URL'),
         'batch_size' => env('OWLOGS_BATCH_SIZE', 50),
+        'max_payload_bytes' => env('OWLOGS_MAX_PAYLOAD_BYTES', 512 * 1024),
+        'min_flush_interval_ms' => env('OWLOGS_MIN_FLUSH_INTERVAL_MS', 500),
+        'compression' => env('OWLOGS_COMPRESSION', true),
         'queue' => env('OWLOGS_QUEUE', 'default'),
         'connection' => env('OWLOGS_QUEUE_CONNECTION'),
         'timeout_s' => env('OWLOGS_TIMEOUT', 30),

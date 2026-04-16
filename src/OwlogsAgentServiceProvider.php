@@ -100,7 +100,9 @@ class OwlogsAgentServiceProvider extends ServiceProvider
                 $monolog = $channel->getLogger();
                 foreach ($monolog->getHandlers() as $handler) {
                     if ($handler instanceof RemoteHandler) {
-                        $handler->flush();
+                        // Force: the job boundary is a natural flush point and
+                        // measures are per-job — debounce would misattribute them.
+                        $handler->flush(true);
                     }
                 }
             } catch (\Throwable) {

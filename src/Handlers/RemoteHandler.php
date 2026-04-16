@@ -21,8 +21,16 @@ class RemoteHandler extends AbstractProcessingHandler
 {
     private int $batchSize;
 
+    private int $maxPayloadBytes;
+
+    private int $minFlushIntervalMs;
+
     /** @var list<array<string, mixed>> */
     private array $buffer = [];
+
+    private int $bufferBytes = 0;
+
+    private ?float $lastFlushAt = null;
 
     private bool $shutdownRegistered = false;
 
@@ -33,37 +41,65 @@ class RemoteHandler extends AbstractProcessingHandler
         parent::__construct($level, $bubble);
 
         $this->batchSize = (int) config('owlogs.transport.batch_size', 50);
+        $this->maxPayloadBytes = (int) config('owlogs.transport.max_payload_bytes', 512 * 1024);
+        $this->minFlushIntervalMs = (int) config('owlogs.transport.min_flush_interval_ms', 500);
     }
 
     protected function write(LogRecord $record): void
     {
         $row = $this->buildRow($record);
+        $encoded = json_encode($row, JSON_UNESCAPED_UNICODE);
+        $this->bufferBytes += $encoded !== false ? strlen($encoded) : 0;
         $this->buffer[] = $row;
 
         if (! $this->shutdownRegistered) {
             $this->shutdownRegistered = true;
-            register_shutdown_function([$this, 'flush']);
+            register_shutdown_function(function (): void {
+                $this->flush(true);
+            });
         }
 
-        if (count($this->buffer) >= $this->batchSize) {
+        // Hard ceiling: bypass debounce when buffer grows unreasonably
+        // (avoids unbounded memory if a tight loop logs faster than we flush).
+        $hardCount = $this->batchSize * 2;
+        $hardBytes = $this->maxPayloadBytes * 2;
+        if (count($this->buffer) >= $hardCount || $this->bufferBytes >= $hardBytes) {
+            $this->flush(true);
+
+            return;
+        }
+
+        if (count($this->buffer) >= $this->batchSize || $this->bufferBytes >= $this->maxPayloadBytes) {
             $this->flush();
         }
     }
 
     /**
-     * Flush buffered rows by dispatching a SendLogsJob.
+     * Flush buffered rows by dispatching one or more SendLogsJob(s).
      *
      * Attaches the current measures snapshot and memory peak to the
      * last row of the batch — this gives the most complete picture.
+     * When the batch would exceed max_payload_bytes it is split into chunks.
+     *
+     * @param  bool  $force  bypass the min_flush_interval debounce
      */
-    public function flush(): void
+    public function flush(bool $force = false): void
     {
         if ($this->buffer === []) {
             return;
         }
 
+        if (! $force && $this->lastFlushAt !== null) {
+            $elapsedMs = (microtime(true) - $this->lastFlushAt) * 1000;
+            if ($elapsedMs < $this->minFlushIntervalMs) {
+                return;
+            }
+        }
+
         $rows = $this->buffer;
         $this->buffer = [];
+        $this->bufferBytes = 0;
+        $this->lastFlushAt = microtime(true);
 
         // Attach measures + memory to the last entry of the batch
         $lastIdx = count($rows) - 1;
@@ -75,18 +111,56 @@ class RemoteHandler extends AbstractProcessingHandler
             $rows[$lastIdx]['memory_peak_mb'] = (int) round(memory_get_peak_usage(true) / 1024 / 1024);
         }
 
-        try {
-            SendLogsJob::dispatch($rows);
-        } catch (Throwable) {
-            // Silent failure: queue backend may be unavailable.
-            // The local file channel (in parallel) still captures entries.
+        foreach ($this->chunkBySize($rows) as $chunk) {
+            try {
+                SendLogsJob::dispatch($chunk);
+            } catch (Throwable) {
+                // Silent failure: queue backend may be unavailable.
+                // The local file channel (in parallel) still captures entries.
+            }
         }
     }
 
     public function close(): void
     {
-        $this->flush();
+        $this->flush(true);
         parent::close();
+    }
+
+    /**
+     * Split rows into chunks whose JSON size stays below max_payload_bytes.
+     *
+     * A single row that already exceeds the cap is sent in its own chunk
+     * (dropping would lose data; the server remains free to reject it).
+     *
+     * @param  list<array<string, mixed>>  $rows
+     * @return list<list<array<string, mixed>>>
+     */
+    private function chunkBySize(array $rows): array
+    {
+        $chunks = [];
+        $current = [];
+        $currentBytes = 0;
+
+        foreach ($rows as $row) {
+            $encoded = json_encode($row, JSON_UNESCAPED_UNICODE);
+            $size = $encoded !== false ? strlen($encoded) : 0;
+
+            if ($current !== [] && $currentBytes + $size > $this->maxPayloadBytes) {
+                $chunks[] = $current;
+                $current = [];
+                $currentBytes = 0;
+            }
+
+            $current[] = $row;
+            $currentBytes += $size;
+        }
+
+        if ($current !== []) {
+            $chunks[] = $current;
+        }
+
+        return $chunks;
     }
 
     /**
