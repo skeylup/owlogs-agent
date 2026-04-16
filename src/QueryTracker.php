@@ -1,0 +1,160 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Skeylup\OwlogsAgent;
+
+use Illuminate\Support\Facades\Context;
+use Illuminate\Support\Str;
+
+/**
+ * Tracks SQL queries during a request/job with caller resolution and N+1 detection.
+ */
+class QueryTracker
+{
+    /** @var array<string, int> */
+    private array $queryCounts = [];
+
+    /** @var array<string, true> */
+    private array $reportedPatterns = [];
+
+    private int $threshold;
+
+    /** @var (callable(array): void)|null */
+    private $onNPlusOne = null;
+
+    /** @var list<string> */
+    private array $ignorePaths = [
+        '/vendor/',
+        '/packages/skeylup/owlogs-agent/',
+    ];
+
+    public function __construct()
+    {
+        $this->threshold = (int) config('owlogs.measure.n_plus_one_threshold', 5);
+
+        $callback = config('owlogs.measure.n_plus_one_callback');
+        if ($callback !== null) {
+            if (is_string($callback) && class_exists($callback)) {
+                $callback = app($callback);
+            }
+            if (is_callable($callback)) {
+                $this->onNPlusOne = $callback;
+            }
+        }
+    }
+
+    /**
+     * Track a query event from DB::listen().
+     *
+     * @param  object{sql: string, bindings: array, time: float, connectionName: string}  $query
+     */
+    public function track(object $query): void
+    {
+        // Skip common internal tables to avoid recursion
+        if (Str::contains($query->sql, ['log_entries'])) {
+            return;
+        }
+
+        $caller = $this->resolveCaller();
+        $normalizedSql = $this->normalizeSql($query->sql);
+
+        Context::push('measures', [
+            'label' => 'db',
+            'duration_ms' => round($query->time, 2),
+            'meta' => [
+                'sql' => Str::limit($query->sql, 300),
+                'connection' => $query->connectionName,
+                'caller' => $caller,
+            ],
+        ]);
+
+        $this->queryCounts[$normalizedSql] = ($this->queryCounts[$normalizedSql] ?? 0) + 1;
+
+        if ($this->queryCounts[$normalizedSql] === $this->threshold && ! isset($this->reportedPatterns[$normalizedSql])) {
+            $this->reportedPatterns[$normalizedSql] = true;
+
+            $pattern = [
+                'sql' => Str::limit($normalizedSql, 500),
+                'count' => $this->queryCounts[$normalizedSql],
+                'caller' => $caller,
+                'connection' => $query->connectionName,
+                'trace_id' => Context::get('trace_id'),
+            ];
+
+            Context::push('measures', [
+                'label' => 'n+1',
+                'duration_ms' => 0,
+                'meta' => $pattern,
+            ]);
+
+            if ($this->onNPlusOne !== null) {
+                try {
+                    ($this->onNPlusOne)($pattern);
+                } catch (\Throwable) {
+                    // Don't let callback failures affect the request
+                }
+            }
+        }
+    }
+
+    /**
+     * Reset state between requests (Octane-safe).
+     */
+    public function reset(): void
+    {
+        $this->queryCounts = [];
+        $this->reportedPatterns = [];
+    }
+
+    /**
+     * @return array<string, int>
+     */
+    public function getNPlusOnePatterns(): array
+    {
+        return array_filter($this->queryCounts, fn (int $count) => $count >= $this->threshold);
+    }
+
+    private function normalizeSql(string $sql): string
+    {
+        $sql = preg_replace("/'.+?'/", '?', $sql);
+        $sql = preg_replace('/"[^"]+?"/', '?', $sql);
+        $sql = preg_replace('/\b\d+\b/', '?', $sql);
+        $sql = preg_replace('/IN\s*\(\?(?:,\s*\?)*\)/i', 'IN (?)', $sql);
+
+        return $sql;
+    }
+
+    private function resolveCaller(): ?string
+    {
+        $basePath = base_path().'/';
+        $frames = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 20);
+
+        foreach ($frames as $frame) {
+            $file = $frame['file'] ?? null;
+            if ($file === null) {
+                continue;
+            }
+
+            $skip = false;
+            foreach ($this->ignorePaths as $path) {
+                if (str_contains($file, $path)) {
+                    $skip = true;
+                    break;
+                }
+            }
+            if ($skip) {
+                continue;
+            }
+
+            if (str_starts_with($file, $basePath)) {
+                $relative = substr($file, strlen($basePath));
+                $line = $frame['line'] ?? '?';
+
+                return "$relative:$line";
+            }
+        }
+
+        return null;
+    }
+}
