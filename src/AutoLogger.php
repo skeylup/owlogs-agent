@@ -119,6 +119,10 @@ class AutoLogger
             Event::listen(JobFailed::class, function (JobFailed $event): void {
                 $jobClass = $event->job->resolveName();
 
+                if ($this->isInternalJob($jobClass)) {
+                    return;
+                }
+
                 Log::error('job.failed: '.class_basename($jobClass).' — '.$event->exception->getMessage(), [
                     'job' => $jobClass,
                     'attempt' => $event->job->attempts(),
@@ -131,6 +135,10 @@ class AutoLogger
             Event::listen(JobExceptionOccurred::class, function (JobExceptionOccurred $event): void {
                 $jobClass = $event->job->resolveName();
 
+                if ($this->isInternalJob($jobClass)) {
+                    return;
+                }
+
                 Log::error('job.exception: '.class_basename($jobClass).' — '.$event->exception->getMessage(), [
                     'job' => $jobClass,
                     'attempt' => $event->job->attempts(),
@@ -142,8 +150,14 @@ class AutoLogger
 
         if ($config['job_retrying'] ?? false) {
             Event::listen(JobRetryRequested::class, function (JobRetryRequested $event): void {
-                Log::warning('job.retrying: '.class_basename($event->job->resolveName()), [
-                    'job' => $event->job->resolveName(),
+                $jobClass = $event->job->resolveName();
+
+                if ($this->isInternalJob($jobClass)) {
+                    return;
+                }
+
+                Log::warning('job.retrying: '.class_basename($jobClass), [
+                    'job' => $jobClass,
                     'delay' => $event->delay,
                 ]);
             });
@@ -542,10 +556,22 @@ class AutoLogger
         return get_class($job);
     }
 
+    /**
+     * Jobs whose lifecycle events must never be logged via this agent.
+     *
+     * Logging a failure here would emit a Log::error() → another buffered
+     * entry → another SendLogsJob dispatch → potentially another failure,
+     * creating a feedback loop that drowns Horizon in retries.
+     *
+     * Covers both the agent's own jobs AND the owlogs server-side jobs so
+     * any ingest/embedding failure stays local (visible in storage/logs and
+     * Horizon failed jobs, not re-shipped through the agent).
+     */
     private function isInternalJob(string $jobClass): bool
     {
         $internals = [
             'Skeylup\\OwlogsAgent\\',
+            'Skeylup\\Owlogs\\',
             'Illuminate\\Queue\\',
             'Illuminate\\Broadcasting\\',
             'Illuminate\\Events\\',

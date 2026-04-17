@@ -34,6 +34,43 @@ class RemoteHandler extends AbstractProcessingHandler
 
     private bool $shutdownRegistered = false;
 
+    /**
+     * When true, every incoming record is dropped on the floor instead of
+     * being buffered. Used by the internal owlogs jobs (SendLogsJob,
+     * IngestLogsJob, GenerateLogEmbeddingsJob) to break feedback loops:
+     *
+     *   owlogs job → Log::* / exception → owlogs channel → buffered
+     *   → new SendLogsJob → same failure → loop.
+     *
+     * Scope is the current PHP process; queue workers serialize their job
+     * execution so the flag is effectively job-scoped when toggled via
+     * suppressedWhile().
+     */
+    public static bool $suppressed = false;
+
+    /**
+     * Execute $callback with owlogs buffering fully disabled. Any Log::* or
+     * exception that would normally reach this handler is silently dropped
+     * for the duration. Nested calls are safe — the previous state is
+     * restored on exit.
+     *
+     * @template TReturn
+     *
+     * @param  callable(): TReturn  $callback
+     * @return TReturn
+     */
+    public static function suppressedWhile(callable $callback): mixed
+    {
+        $previous = self::$suppressed;
+        self::$suppressed = true;
+
+        try {
+            return $callback();
+        } finally {
+            self::$suppressed = $previous;
+        }
+    }
+
     public function __construct(
         Level|int|string $level = Level::Debug,
         bool $bubble = true,
@@ -47,6 +84,10 @@ class RemoteHandler extends AbstractProcessingHandler
 
     protected function write(LogRecord $record): void
     {
+        if (self::$suppressed) {
+            return;
+        }
+
         $row = $this->buildRow($record);
         $encoded = json_encode($row, JSON_UNESCAPED_UNICODE);
         $this->bufferBytes += $encoded !== false ? strlen($encoded) : 0;

@@ -10,6 +10,7 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Http;
+use Skeylup\OwlogsAgent\Handlers\RemoteHandler;
 use Throwable;
 
 /**
@@ -24,14 +25,14 @@ class SendLogsJob implements ShouldQueue
     use Queueable;
     use SerializesModels;
 
-    public int $tries = 5;
+    public int $tries = 3;
 
     public int $timeout = 30;
 
     private const DEFAULT_INGEST_URL = 'https://www.owlogs.com/api/owlogs/ingest';
 
-    /** @var list<int> backoff in seconds between retries */
-    public array $backoff = [2, 5, 15, 60, 180];
+    /** @var list<int> Exponential backoff: 5s, 30s, 120s */
+    public array $backoff = [5, 30, 120];
 
     /**
      * @param  list<array<string, mixed>>  $logs
@@ -47,6 +48,16 @@ class SendLogsJob implements ShouldQueue
     }
 
     public function handle(): void
+    {
+        // Nothing emitted from within this job may reach the owlogs channel —
+        // any failure would be auto-logged, bufferred, and trigger a fresh
+        // SendLogsJob that reproduces the same failure, ad infinitum.
+        RemoteHandler::suppressedWhile(function (): void {
+            $this->send();
+        });
+    }
+
+    private function send(): void
     {
         $apiKey = (string) config('owlogs.api_key');
 
@@ -85,7 +96,14 @@ class SendLogsJob implements ShouldQueue
 
             $status = $response->status();
 
-            // 4xx client errors — do not retry
+            // 429 — quota exhausted, do not retry (logs would be rejected again)
+            if ($status === 429) {
+                $this->fail(new \RuntimeException('Owlogs quota exhausted: '.$response->body()));
+
+                return;
+            }
+
+            // Other 4xx client errors — do not retry (bad key, validation, etc.)
             if ($status >= 400 && $status < 500) {
                 $this->fail(new \RuntimeException("Owlogs ingestion rejected with status {$status}: ".$response->body()));
 
@@ -103,17 +121,23 @@ class SendLogsJob implements ShouldQueue
     public function failed(Throwable $exception): void
     {
         // Last-resort: log locally so ops can see something failed.
-        // We use the default log channel (file) to avoid infinite loop.
-        try {
-            logger()->channel(config('logging.default'))->warning(
-                'Owlogs SendLogsJob failed permanently',
-                [
-                    'error' => $exception->getMessage(),
-                    'logs_count' => count($this->logs),
-                ]
-            );
-        } catch (Throwable) {
-            // swallow
-        }
+        //
+        // Belt-and-braces: we force the `single` channel AND suppress the
+        // remote handler. Either one alone would be enough, but together
+        // we guarantee no feedback loop even if `logging.default` changes
+        // or a future upstream middleware reinjects on the stack.
+        RemoteHandler::suppressedWhile(function () use ($exception): void {
+            try {
+                logger()->channel('single')->warning(
+                    'Owlogs SendLogsJob failed permanently',
+                    [
+                        'error' => $exception->getMessage(),
+                        'logs_count' => count($this->logs),
+                    ]
+                );
+            } catch (Throwable) {
+                // swallow
+            }
+        });
     }
 }
