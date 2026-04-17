@@ -248,7 +248,6 @@ class RemoteHandler extends AbstractProcessingHandler
             'request_input' => $contextData['request_input'] ?? null,
 
             'user_id' => $contextData['user_id'] ?? auth()->id(),
-            'tenant_id' => $contextData['tenant_id'] ?? null,
 
             'app_name' => $contextData['app_name'] ?? null,
             'app_env' => $contextData['app_env'] ?? null,

@@ -298,7 +298,7 @@ class AutoLogger
 
         if ($config['db_transaction'] ?? false) {
             Event::listen(TransactionCommitted::class, function (TransactionCommitted $event): void {
-                Log::debug('db.transaction.committed', [
+                Log::debug('db.transaction.committed: '.$event->connectionName, [
                     'connection' => $event->connectionName,
                 ]);
             });
@@ -306,7 +306,7 @@ class AutoLogger
 
         if ($config['migration'] ?? false) {
             Event::listen(MigrationEnded::class, function (MigrationEnded $event): void {
-                Log::info('db.migration', [
+                Log::info('db.migration: '.class_basename($event->migration).' ('.$event->method.')', [
                     'migration' => get_class($event->migration),
                     'direction' => $event->method,
                 ]);
@@ -320,7 +320,7 @@ class AutoLogger
     {
         if ($config['cache_miss'] ?? false) {
             Event::listen(CacheMissed::class, function (CacheMissed $event): void {
-                Log::debug('cache.miss', [
+                Log::debug('cache.miss: '.$event->key, [
                     'key' => $event->key,
                     'store' => $event->storeName,
                 ]);
@@ -329,7 +329,7 @@ class AutoLogger
 
         if ($config['cache_hit'] ?? false) {
             Event::listen(CacheHit::class, function (CacheHit $event): void {
-                Log::debug('cache.hit', [
+                Log::debug('cache.hit: '.$event->key, [
                     'key' => $event->key,
                     'store' => $event->storeName,
                 ]);

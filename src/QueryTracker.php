@@ -88,6 +88,18 @@ class QueryTracker
                 'meta' => $pattern,
             ]);
 
+            // Log as a visible WARNING entry in the same trace
+            $table = $this->extractTableName($query->sql);
+            $callerShort = $caller ? basename(str_replace(':', '#', $caller)) : '?';
+            $message = "[n+1.detected] {$table} — {$callerShort}";
+
+            logger()->warning($message, [
+                'sql' => $pattern['sql'],
+                'count' => $pattern['count'],
+                'caller' => $pattern['caller'],
+                'connection' => $pattern['connection'],
+            ]);
+
             if ($this->onNPlusOne !== null) {
                 try {
                     ($this->onNPlusOne)($pattern);
@@ -113,6 +125,27 @@ class QueryTracker
     public function getNPlusOnePatterns(): array
     {
         return array_filter($this->queryCounts, fn (int $count) => $count >= $this->threshold);
+    }
+
+    /**
+     * Extract the primary table name from a SQL query.
+     */
+    private function extractTableName(string $sql): string
+    {
+        // SELECT ... FROM "table"
+        if (preg_match('/\bfrom\s+[`"]?(\w+)[`"]?/i', $sql, $m)) {
+            return $m[1];
+        }
+        // INSERT INTO "table"
+        if (preg_match('/\binto\s+[`"]?(\w+)[`"]?/i', $sql, $m)) {
+            return $m[1];
+        }
+        // UPDATE "table"
+        if (preg_match('/\bupdate\s+[`"]?(\w+)[`"]?/i', $sql, $m)) {
+            return $m[1];
+        }
+
+        return 'unknown';
     }
 
     private function normalizeSql(string $sql): string

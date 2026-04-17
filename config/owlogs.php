@@ -73,7 +73,6 @@ return [
         'ip' => true,
         'user_agent' => true,
         'user_id' => true,
-        'tenant_id' => true,
         'duration_ms' => true,
         'git_sha' => true,
         'request_input' => true,

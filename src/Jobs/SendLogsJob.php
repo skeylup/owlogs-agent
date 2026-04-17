@@ -96,6 +96,13 @@ class SendLogsJob implements ShouldQueue
 
             $status = $response->status();
 
+            // 403 — no active subscription/trial, do not retry
+            if ($status === 403) {
+                $this->fail(new \RuntimeException('Owlogs subscription required: '.$response->body()));
+
+                return;
+            }
+
             // 429 — quota exhausted, do not retry (logs would be rejected again)
             if ($status === 429) {
                 $this->fail(new \RuntimeException('Owlogs quota exhausted: '.$response->body()));

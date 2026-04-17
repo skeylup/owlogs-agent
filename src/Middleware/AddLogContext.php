@@ -77,13 +77,6 @@ class AddLogContext
             }
         }
 
-        if ($fields['tenant_id'] ?? true) {
-            $tenantId = $this->resolveTenantId();
-            if ($tenantId !== null) {
-                Context::add('tenant_id', $tenantId);
-            }
-        }
-
         if ($fields['git_sha'] ?? true) {
             $gitSha = $this->resolveGitSha();
             if ($gitSha !== null) {
@@ -144,13 +137,6 @@ class AddLogContext
         if ($user instanceof HasLogContext) {
             Context::add('user_context', $user->toLogContext());
             Context::add('user_label', $user->getLogContextLabel());
-        }
-
-        if ($fields['tenant_id'] ?? true) {
-            $tenantId = $this->resolveTenantId();
-            if ($tenantId !== null) {
-                Context::add('tenant_id', $tenantId);
-            }
         }
 
         // Duration
@@ -219,21 +205,6 @@ class AddLogContext
         }
 
         Context::add('request_input', $json);
-    }
-
-    private function resolveTenantId(): int|string|null
-    {
-        $resolver = config('owlogs.tenant_resolver');
-
-        if ($resolver !== null && is_callable($resolver)) {
-            return $resolver();
-        }
-
-        if (function_exists('tenant')) {
-            return tenant()?->getKey();
-        }
-
-        return null;
     }
 
     /**
