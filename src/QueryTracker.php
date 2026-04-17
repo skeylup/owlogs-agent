@@ -51,12 +51,17 @@ class QueryTracker
      */
     public function track(object $query): void
     {
-        // Skip common internal tables to avoid recursion
-        if (Str::contains($query->sql, ['log_entries'])) {
+        // Skip internal/system tables
+        if (Str::contains($query->sql, ['log_entries', 'log_issues', 'log_issue_occurrences', 'log_embeddings', 'pg_', 'information_schema'])) {
             return;
         }
 
         $caller = $this->resolveCaller();
+
+        // Skip queries from migrations
+        if ($caller !== null && Str::contains($caller, ['/migrations/', 'Migration'])) {
+            return;
+        }
         $normalizedSql = $this->normalizeSql($query->sql);
 
         Context::push('measures', [
