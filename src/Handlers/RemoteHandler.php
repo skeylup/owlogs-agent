@@ -268,7 +268,7 @@ class RemoteHandler extends AbstractProcessingHandler
             'memory_peak_mb' => null,
             'extra' => $this->buildExtra($extra, $contextData),
 
-            'logged_at' => $record->datetime->format('Y-m-d H:i:s.v'),
+            'logged_at' => $record->datetime->setTimezone(new \DateTimeZone('UTC'))->format('Y-m-d H:i:s.v'),
         ];
     }
 

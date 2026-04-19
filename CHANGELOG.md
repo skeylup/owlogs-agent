@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-04-19
+
+### Fixed
+- `RemoteHandler` now normalises `logged_at` to UTC before shipping. Apps running in a non-UTC timezone were sending local timestamps, which the server stored verbatim as `timestamp WITHOUT time zone` — the logs ended up offset by the TZ delta and fell outside the UI's default time window.
+
 ## [1.0.0] - 2026-04-19
 
 ### Added
