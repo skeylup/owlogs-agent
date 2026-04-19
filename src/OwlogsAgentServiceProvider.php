@@ -4,11 +4,13 @@ declare(strict_types=1);
 
 namespace Skeylup\OwlogsAgent;
 
+use Illuminate\Console\Events\CommandFinished;
 use Illuminate\Console\Events\CommandStarting;
 use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Log\Context\Repository;
 use Illuminate\Queue\Events\JobProcessed;
 use Illuminate\Queue\Events\JobProcessing;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Context;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
@@ -71,6 +73,26 @@ class OwlogsAgentServiceProvider extends ServiceProvider
 
             if ($fields['origin'] ?? true) {
                 $context->add('origin', 'queue');
+            }
+
+            // Defensive fill: if the dispatcher didn't set these (e.g. job
+            // dispatched from a bare CLI, tinker, or an external process),
+            // populate them from config so log rows are never missing the
+            // app identity. addIf() never overwrites an existing value.
+            if (($fields['app_name'] ?? true) && ! $context->has('app_name')) {
+                $context->add('app_name', (string) config('app.name'));
+            }
+            if (($fields['app_env'] ?? true) && ! $context->has('app_env')) {
+                $context->add('app_env', (string) config('app.env'));
+            }
+            if (($fields['app_url'] ?? true) && ! $context->has('app_url')) {
+                $context->add('app_url', (string) config('app.url'));
+            }
+            if (($fields['git_sha'] ?? true) && ! $context->has('git_sha')) {
+                $sha = AddLogContext::resolveGitSha();
+                if ($sha !== null) {
+                    $context->add('git_sha', $sha);
+                }
             }
         });
 
@@ -154,13 +176,16 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             return;
         }
 
-        Event::listen(CommandStarting::class, function (CommandStarting $event): void {
-            $ignore = ['schedule:run', 'schedule:finish', 'package:discover', 'queue:work', 'queue:listen', 'pail'];
+        $ignore = ['schedule:run', 'schedule:finish', 'package:discover', 'queue:work', 'queue:listen', 'pail'];
+        $startTime = null;
+
+        Event::listen(CommandStarting::class, function (CommandStarting $event) use ($ignore, &$startTime): void {
             if (in_array($event->command, $ignore, true)) {
                 return;
             }
 
             $fields = config('owlogs.fields', []);
+            $startTime = hrtime(true);
 
             if ($fields['trace_id'] ?? true) {
                 Context::addIf('trace_id', (string) Str::ulid());
@@ -174,6 +199,38 @@ class OwlogsAgentServiceProvider extends ServiceProvider
                 Context::add('origin', 'cli');
             }
 
+            // App identity — mirrors AddLogContext for CLI so log rows
+            // dispatched from artisan (and any queue jobs chained from them)
+            // carry app_name / app_env / app_url just like HTTP requests.
+            if ($fields['app_name'] ?? true) {
+                Context::addIf('app_name', (string) config('app.name'));
+            }
+            if ($fields['app_env'] ?? true) {
+                Context::addIf('app_env', (string) config('app.env'));
+            }
+            if ($fields['app_url'] ?? true) {
+                Context::addIf('app_url', (string) config('app.url'));
+            }
+
+            if ($fields['git_sha'] ?? true) {
+                $sha = AddLogContext::resolveGitSha();
+                if ($sha !== null) {
+                    Context::addIf('git_sha', $sha);
+                }
+            }
+
+            // Authenticated CLI user (rare but possible — e.g. a command that
+            // impersonates a user before dispatching domain logic).
+            if ($fields['user_id'] ?? true) {
+                try {
+                    if (Auth::hasUser()) {
+                        Context::addIf('user_id', Auth::id());
+                    }
+                } catch (\Throwable) {
+                    // Auth may not be bootable in every CLI context.
+                }
+            }
+
             Context::add('command_name', $event->command ?? 'unknown');
 
             if ($event->input) {
@@ -182,6 +239,27 @@ class OwlogsAgentServiceProvider extends ServiceProvider
                     Context::add('command_args', Str::limit($args, 500));
                 }
             }
+        });
+
+        Event::listen(CommandFinished::class, function (CommandFinished $event) use ($ignore, &$startTime): void {
+            if (in_array($event->command, $ignore, true) || $startTime === null) {
+                return;
+            }
+
+            $fields = config('owlogs.fields', []);
+
+            if ($fields['duration_ms'] ?? true) {
+                $durationMs = (int) round((hrtime(true) - $startTime) / 1_000_000);
+                Context::add('duration_ms', $durationMs);
+
+                Context::push('measures', [
+                    'label' => 'command',
+                    'duration_ms' => (float) $durationMs,
+                    'meta' => ['command' => $event->command],
+                ]);
+            }
+
+            $startTime = null;
         });
     }
 

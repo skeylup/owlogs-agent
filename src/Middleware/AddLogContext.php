@@ -78,7 +78,7 @@ class AddLogContext
         }
 
         if ($fields['git_sha'] ?? true) {
-            $gitSha = $this->resolveGitSha();
+            $gitSha = self::resolveGitSha();
             if ($gitSha !== null) {
                 Context::add('git_sha', $gitSha);
             }
@@ -211,7 +211,7 @@ class AddLogContext
      * Resolve the git SHA once and cache it for the process lifetime.
      * Safe under Octane because it only changes on deploy.
      */
-    private function resolveGitSha(): ?string
+    public static function resolveGitSha(): ?string
     {
         static $sha = null;
         static $resolved = false;

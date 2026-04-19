@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-04-19
+
+### Fixed
+- CLI (`CommandStarting`) context now populates `app_name`, `app_env`, `app_url`, `git_sha`, and (when authenticated) `user_id`, mirroring the HTTP middleware. Log rows emitted from artisan commands — and queue jobs chained from them — were previously missing the app identity, which broke per-environment filtering in the viewer.
+- Queue `Context::hydrated` listener now defensively fills `app_name`, `app_env`, `app_url`, `git_sha` when absent from the dispatcher-serialized context (covers jobs dispatched from tinker, bare CLI, or external processes).
+
+### Added
+- `CommandFinished` listener that records `duration_ms` and a `command` measure, matching the per-request timing captured by `AddLogContext`.
+- `AddLogContext::resolveGitSha()` is now a public static helper so the CLI + queue listeners can reuse the cached SHA resolution.
+
 ## [1.0.2] - 2026-04-19
 
 ### Fixed
