@@ -93,20 +93,30 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             $this->addJobProperties($event);
         });
 
-        // Flush the remote handler after each job to ensure measures are captured
+        // Flush the remote handler after each job so measures are captured.
         Queue::after(function (JobProcessed $event): void {
             $this->flushRemoteHandler();
         });
 
-        // Octane: register_shutdown_function only fires when the worker dies,
-        // so without this the buffer sits across hundreds of HTTP requests
-        // until max-requests recycles the worker. Listen to the RequestTerminated
-        // event (emitted after the response is sent) to flush per-request.
-        if (class_exists(\Laravel\Octane\Events\RequestTerminated::class)) {
-            Event::listen(
-                \Laravel\Octane\Events\RequestTerminated::class,
-                fn () => $this->flushRemoteHandler(),
-            );
+        // Flush policy depends on runtime:
+        //   - classic PHP-FPM / CLI → register_shutdown_function (already set in
+        //     RemoteHandler::write) fires at end of request / process.
+        //   - Octane → the worker lives forever, shutdown hooks only fire on
+        //     max-requests recycle. Register a 1s tick so the buffer drains
+        //     near-realtime without per-request job overhead. The batch-size
+        //     threshold (OWLOGS_BATCH_SIZE, default 50) still flushes earlier
+        //     if many rows pile up in a single request.
+        if (class_exists(\Laravel\Octane\Facades\Octane::class)) {
+            try {
+                \Laravel\Octane\Facades\Octane::tick(
+                    'owlogs-remote-handler-flush',
+                    fn () => $this->flushRemoteHandler(),
+                )->seconds(1);
+            } catch (\Throwable) {
+                // tick() can throw when called outside an Octane worker
+                // (e.g. artisan commands). Safe to ignore — those contexts
+                // rely on shutdown / queue-after flushing instead.
+            }
         }
     }
 
