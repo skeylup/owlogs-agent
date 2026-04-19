@@ -95,20 +95,38 @@ class OwlogsAgentServiceProvider extends ServiceProvider
 
         // Flush the remote handler after each job to ensure measures are captured
         Queue::after(function (JobProcessed $event): void {
-            try {
-                $channel = app('log')->channel('owlogs');
-                $monolog = $channel->getLogger();
-                foreach ($monolog->getHandlers() as $handler) {
-                    if ($handler instanceof RemoteHandler) {
-                        // Force: the job boundary is a natural flush point and
-                        // measures are per-job — debounce would misattribute them.
-                        $handler->flush(true);
-                    }
-                }
-            } catch (\Throwable) {
-                // Channel may not exist in all configurations
-            }
+            $this->flushRemoteHandler();
         });
+
+        // Octane: register_shutdown_function only fires when the worker dies,
+        // so without this the buffer sits across hundreds of HTTP requests
+        // until max-requests recycles the worker. Listen to the RequestTerminated
+        // event (emitted after the response is sent) to flush per-request.
+        if (class_exists(\Laravel\Octane\Events\RequestTerminated::class)) {
+            Event::listen(
+                \Laravel\Octane\Events\RequestTerminated::class,
+                fn () => $this->flushRemoteHandler(),
+            );
+        }
+    }
+
+    /**
+     * Force-flush the owlogs channel's RemoteHandler buffer. Silent when the
+     * channel isn't wired up (e.g. non-http/queue contexts).
+     */
+    private function flushRemoteHandler(): void
+    {
+        try {
+            $channel = app('log')->channel('owlogs');
+            $monolog = $channel->getLogger();
+            foreach ($monolog->getHandlers() as $handler) {
+                if ($handler instanceof RemoteHandler) {
+                    $handler->flush(true);
+                }
+            }
+        } catch (\Throwable) {
+            // Channel may not exist in all configurations.
+        }
     }
 
     /**
