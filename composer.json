@@ -3,27 +3,46 @@
     "name": "skeylup/owlogs-agent",
     "description": "Owlogs agent — ship Laravel logs to an Owlogs server for aggregation and viewing.",
     "type": "library",
+    "keywords": [
+        "laravel",
+        "logging",
+        "logs",
+        "observability",
+        "monolog",
+        "tracing",
+        "octane",
+        "owlogs",
+        "apm"
+    ],
+    "homepage": "https://www.owlogs.com",
     "license": "MIT",
     "authors": [
         {
             "name": "Skeylup",
-            "homepage": "https://www.owlogs.com"
+            "email": "hello@owlogs.com",
+            "homepage": "https://www.owlogs.com",
+            "role": "Maintainer"
         }
     ],
+    "support": {
+        "issues": "https://github.com/skeylup/owlogs-agent/issues",
+        "source": "https://github.com/skeylup/owlogs-agent",
+        "docs": "https://github.com/skeylup/owlogs-agent#readme"
+    },
     "require": {
         "php": "^8.2",
-        "illuminate/support": "^11.0|^12.0|^13.0",
-        "illuminate/log": "^11.0|^12.0|^13.0",
-        "illuminate/http": "^11.0|^12.0|^13.0",
-        "illuminate/queue": "^11.0|^12.0|^13.0",
         "illuminate/console": "^11.0|^12.0|^13.0",
+        "illuminate/http": "^11.0|^12.0|^13.0",
+        "illuminate/log": "^11.0|^12.0|^13.0",
+        "illuminate/queue": "^11.0|^12.0|^13.0",
+        "illuminate/support": "^11.0|^12.0|^13.0",
         "monolog/monolog": "^3.0"
     },
     "require-dev": {
         "laravel/pint": "^1.14",
-        "orchestra/testbench": "^10.0.0||^9.0.0",
-        "pestphp/pest": "^3.0||^4.0",
-        "pestphp/pest-plugin-laravel": "^3.0||^4.0"
+        "orchestra/testbench": "^9.0|^10.0",
+        "pestphp/pest": "^3.0|^4.0",
+        "pestphp/pest-plugin-laravel": "^3.0|^4.0"
     },
     "autoload": {
         "psr-4": {
@@ -52,6 +71,6 @@
             ]
         }
     },
-    "minimum-stability": "dev",
+    "minimum-stability": "stable",
     "prefer-stable": true
 }
