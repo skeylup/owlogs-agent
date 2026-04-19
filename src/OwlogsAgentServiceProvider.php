@@ -15,6 +15,9 @@ use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Str;
+use Laravel\Octane\Events\RequestTerminated;
+use Laravel\Octane\Events\TaskTerminated;
+use Laravel\Octane\Events\WorkerStopping;
 use Skeylup\OwlogsAgent\Handlers\RemoteHandler;
 use Skeylup\OwlogsAgent\Middleware\AddLogContext;
 
@@ -98,24 +101,27 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             $this->flushRemoteHandler();
         });
 
-        // Flush policy depends on runtime:
-        //   - classic PHP-FPM / CLI → register_shutdown_function (already set in
-        //     RemoteHandler::write) fires at end of request / process.
-        //   - Octane → the worker lives forever, shutdown hooks only fire on
-        //     max-requests recycle. Register a 1s tick so the buffer drains
-        //     near-realtime without per-request job overhead. The batch-size
-        //     threshold (OWLOGS_BATCH_SIZE, default 50) still flushes earlier
-        //     if many rows pile up in a single request.
-        if (class_exists(\Laravel\Octane\Facades\Octane::class)) {
-            try {
-                \Laravel\Octane\Facades\Octane::tick(
-                    'owlogs-remote-handler-flush',
-                    fn () => $this->flushRemoteHandler(),
-                )->seconds(1);
-            } catch (\Throwable) {
-                // tick() can throw when called outside an Octane worker
-                // (e.g. artisan commands). Safe to ignore — those contexts
-                // rely on shutdown / queue-after flushing instead.
+        // Flush policy by runtime:
+        //   - PHP-FPM / CLI → register_shutdown_function (set in RemoteHandler::write).
+        //   - Octane (Swoole / RoadRunner / FrankenPHP) → workers are long-lived so
+        //     shutdown hooks only run on recycle. Octane::tick() is Swoole-only, so
+        //     we listen to request/task/worker lifecycle events instead — all three
+        //     runtimes dispatch them. flush() is debounced via min_flush_interval_ms
+        //     and short-circuits on empty buffer, so per-request listeners are cheap.
+        $this->registerOctaneFlushListeners();
+    }
+
+    private function registerOctaneFlushListeners(): void
+    {
+        $events = [
+            RequestTerminated::class,
+            TaskTerminated::class,
+            WorkerStopping::class,
+        ];
+
+        foreach ($events as $event) {
+            if (class_exists($event)) {
+                Event::listen($event, fn () => $this->flushRemoteHandler());
             }
         }
     }
