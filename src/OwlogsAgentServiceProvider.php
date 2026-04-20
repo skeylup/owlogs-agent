@@ -19,7 +19,12 @@ use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Str;
 use Laravel\Octane\Events\RequestTerminated;
 use Laravel\Octane\Events\TaskTerminated;
+use Laravel\Octane\Events\WorkerStarting;
 use Laravel\Octane\Events\WorkerStopping;
+use Skeylup\OwlogsAgent\Flushing\EndOfRequestPolicy;
+use Skeylup\OwlogsAgent\Flushing\FlushPolicy;
+use Skeylup\OwlogsAgent\Flushing\OctaneWindowPolicy;
+use Skeylup\OwlogsAgent\Flushing\RuntimeDetector;
 use Skeylup\OwlogsAgent\Handlers\RemoteHandler;
 use Skeylup\OwlogsAgent\Handlers\RemoteLogChannel;
 use Skeylup\OwlogsAgent\Middleware\AddLogContext;
@@ -32,6 +37,22 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             __DIR__.'/../config/owlogs.php',
             'owlogs'
         );
+
+        $this->app->singleton(FlushPolicy::class, function (): FlushPolicy {
+            $override = config('owlogs.transport.flush_strategy');
+
+            if ($override === 'octane') {
+                return new OctaneWindowPolicy;
+            }
+
+            if ($override === 'end_of_request') {
+                return new EndOfRequestPolicy;
+            }
+
+            return RuntimeDetector::isOctane()
+                ? new OctaneWindowPolicy
+                : new EndOfRequestPolicy;
+        });
     }
 
     public function boot(): void
@@ -50,6 +71,7 @@ class OwlogsAgentServiceProvider extends ServiceProvider
         $this->registerCommandContext();
         $this->registerAutoInstrumentation();
         $this->registerAutoLogger();
+        $this->registerFlushHooks();
 
         if ($this->app->runningInConsole()) {
             $this->publishes([
@@ -158,53 +180,122 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             $this->addJobProperties($event);
         });
 
-        // Flush the remote handler after each job so measures are captured.
+        // Job-boundary flush: delegates to the active FlushPolicy so the
+        // Octane batch window is respected under Octane (task workers) and
+        // classic workers force-flush via EndOfRequestPolicy.
         Queue::after(function (JobProcessed $event): void {
-            $this->flushRemoteHandler();
+            $this->onRequestBoundary();
         });
-
-        // Flush policy by runtime:
-        //   - PHP-FPM / CLI → register_shutdown_function (set in RemoteHandler::write).
-        //   - Octane (Swoole / RoadRunner / FrankenPHP) → workers are long-lived so
-        //     shutdown hooks only run on recycle. Octane::tick() is Swoole-only, so
-        //     we listen to request/task/worker lifecycle events instead — all three
-        //     runtimes dispatch them. flush() is debounced via min_flush_interval_ms
-        //     and short-circuits on empty buffer, so per-request listeners are cheap.
-        $this->registerOctaneFlushListeners();
-    }
-
-    private function registerOctaneFlushListeners(): void
-    {
-        $events = [
-            RequestTerminated::class,
-            TaskTerminated::class,
-            WorkerStopping::class,
-        ];
-
-        foreach ($events as $event) {
-            if (class_exists($event)) {
-                Event::listen($event, fn () => $this->flushRemoteHandler());
-            }
-        }
     }
 
     /**
-     * Force-flush the owlogs channel's RemoteHandler buffer. Silent when the
-     * channel isn't wired up (e.g. non-http/queue contexts).
+     * Wire runtime-appropriate flush triggers.
+     *
+     * - Non-Octane (PHP-FPM / classic CLI / queue:work) → Laravel's
+     *   terminating() hook + the shutdown function already registered in
+     *   RemoteHandler::write() cover end-of-request.
+     * - Octane (all servers) → RequestTerminated, TaskTerminated,
+     *   WorkerStopping delegate to the policy (check the 2s / 20-log
+     *   window, not a force flush).
+     * - Octane on Swoole → Octane::tick fires every second so records
+     *   emitted during an idle period still ship within the window.
      */
-    private function flushRemoteHandler(): void
+    private function registerFlushHooks(): void
+    {
+        if (RuntimeDetector::isOctane()) {
+            $this->registerOctaneFlushHooks();
+
+            return;
+        }
+
+        $this->app->terminating(function (): void {
+            $this->onRequestBoundary();
+        });
+    }
+
+    private function registerOctaneFlushHooks(): void
+    {
+        if (class_exists(RequestTerminated::class)) {
+            Event::listen(RequestTerminated::class, fn () => $this->onRequestBoundary());
+        }
+
+        if (class_exists(TaskTerminated::class)) {
+            Event::listen(TaskTerminated::class, fn () => $this->onRequestBoundary());
+        }
+
+        if (class_exists(WorkerStopping::class)) {
+            Event::listen(WorkerStopping::class, fn () => $this->onWorkerStopping());
+        }
+
+        if (class_exists(WorkerStarting::class) && RuntimeDetector::octaneServer() === 'swoole') {
+            Event::listen(WorkerStarting::class, function (): void {
+                $facade = 'Laravel\\Octane\\Facades\\Octane';
+                if (! class_exists($facade)) {
+                    return;
+                }
+
+                try {
+                    $facade::tick('owlogs-flush', function (): void {
+                        $this->onTick();
+                    })->seconds(1)->immediate();
+                } catch (\Throwable) {
+                    // Tick registration is best-effort; failures must not
+                    // block worker startup.
+                }
+            });
+        }
+    }
+
+    private function onRequestBoundary(): void
+    {
+        $handler = $this->resolveRemoteHandler();
+        if ($handler === null) {
+            return;
+        }
+
+        app(FlushPolicy::class)->onRequestBoundary($handler);
+    }
+
+    private function onWorkerStopping(): void
+    {
+        $handler = $this->resolveRemoteHandler();
+        if ($handler === null) {
+            return;
+        }
+
+        app(FlushPolicy::class)->onWorkerStopping($handler);
+    }
+
+    private function onTick(): void
+    {
+        $handler = $this->resolveRemoteHandler();
+        if ($handler === null) {
+            return;
+        }
+
+        app(FlushPolicy::class)->onTick($handler);
+    }
+
+    /**
+     * Resolve the RemoteHandler attached to the `owlogs` channel.
+     * Returns null when the channel isn't wired up (e.g. non-http/queue
+     * contexts, or the user has replaced the channel definition).
+     */
+    private function resolveRemoteHandler(): ?RemoteHandler
     {
         try {
             $channel = app('log')->channel('owlogs');
             $monolog = $channel->getLogger();
             foreach ($monolog->getHandlers() as $handler) {
                 if ($handler instanceof RemoteHandler) {
-                    $handler->flush(true);
+                    return $handler;
                 }
             }
         } catch (\Throwable) {
             // Channel may not exist in all configurations.
         }
+
+        return null;
     }
 
     /**
@@ -300,6 +391,8 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             }
 
             $startTime = null;
+
+            $this->onRequestBoundary();
         });
     }
 

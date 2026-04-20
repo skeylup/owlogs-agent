@@ -10,12 +10,16 @@ use Monolog\Handler\AbstractProcessingHandler;
 use Monolog\Level;
 use Monolog\LogRecord;
 use Skeylup\OwlogsAgent\Contracts\HasLogContext;
+use Skeylup\OwlogsAgent\Flushing\EndOfRequestPolicy;
+use Skeylup\OwlogsAgent\Flushing\FlushPolicy;
 use Skeylup\OwlogsAgent\Jobs\SendLogsJob;
 use Throwable;
 
 /**
- * Monolog handler that buffers log records and ships them to the Owlogs server
- * via a queue job. Buffers in memory, flushes on batch size / shutdown / queue after.
+ * Monolog handler that buffers log records and ships them to the Owlogs
+ * server via SendLogsJob. "When to flush" is owned by an injected
+ * FlushPolicy — this class only buffers, enforces a memory hard ceiling,
+ * and chunks the final payload for HTTP.
  */
 class RemoteHandler extends AbstractProcessingHandler
 {
@@ -23,16 +27,18 @@ class RemoteHandler extends AbstractProcessingHandler
 
     private int $maxPayloadBytes;
 
-    private int $minFlushIntervalMs;
-
     /** @var list<array<string, mixed>> */
     private array $buffer = [];
 
     private int $bufferBytes = 0;
 
-    private ?float $lastFlushAt = null;
+    private ?float $firstBufferedAt = null;
 
     private bool $shutdownRegistered = false;
+
+    private bool $flushing = false;
+
+    private FlushPolicy $policy;
 
     /**
      * When true, every incoming record is dropped on the floor instead of
@@ -74,12 +80,33 @@ class RemoteHandler extends AbstractProcessingHandler
     public function __construct(
         Level|int|string $level = Level::Debug,
         bool $bubble = true,
+        ?FlushPolicy $policy = null,
     ) {
         parent::__construct($level, $bubble);
 
         $this->batchSize = (int) config('owlogs.transport.batch_size', 50);
         $this->maxPayloadBytes = (int) config('owlogs.transport.max_payload_bytes', 512 * 1024);
-        $this->minFlushIntervalMs = (int) config('owlogs.transport.min_flush_interval_ms', 500);
+        $this->policy = $policy ?? new EndOfRequestPolicy;
+    }
+
+    public function setPolicy(FlushPolicy $policy): void
+    {
+        $this->policy = $policy;
+    }
+
+    public function bufferCount(): int
+    {
+        return count($this->buffer);
+    }
+
+    public function bufferBytes(): int
+    {
+        return $this->bufferBytes;
+    }
+
+    public function firstBufferedAt(): ?float
+    {
+        return $this->firstBufferedAt;
     }
 
     protected function write(LogRecord $record): void
@@ -93,6 +120,10 @@ class RemoteHandler extends AbstractProcessingHandler
         $this->bufferBytes += $encoded !== false ? strlen($encoded) : 0;
         $this->buffer[] = $row;
 
+        if ($this->firstBufferedAt === null) {
+            $this->firstBufferedAt = microtime(true);
+        }
+
         if (! $this->shutdownRegistered) {
             $this->shutdownRegistered = true;
             register_shutdown_function(function (): void {
@@ -100,8 +131,9 @@ class RemoteHandler extends AbstractProcessingHandler
             });
         }
 
-        // Hard ceiling: bypass debounce when buffer grows unreasonably
-        // (avoids unbounded memory if a tight loop logs faster than we flush).
+        // Hard ceiling: bypass any policy when the buffer grows unreasonably.
+        // Protects against a runaway caller logging faster than we can ship
+        // (same risk in FPM or under Octane — memory is the only constraint).
         $hardCount = $this->batchSize * 2;
         $hardBytes = $this->maxPayloadBytes * 2;
         if (count($this->buffer) >= $hardCount || $this->bufferBytes >= $hardBytes) {
@@ -110,19 +142,17 @@ class RemoteHandler extends AbstractProcessingHandler
             return;
         }
 
-        if (count($this->buffer) >= $this->batchSize || $this->bufferBytes >= $this->maxPayloadBytes) {
-            $this->flush();
-        }
+        $this->policy->onWrite($this);
     }
 
     /**
      * Flush buffered rows by dispatching one or more SendLogsJob(s).
      *
-     * Attaches the current measures snapshot and memory peak to the
-     * last row of the batch — this gives the most complete picture.
-     * When the batch would exceed max_payload_bytes it is split into chunks.
+     * Attaches the current measures snapshot and memory peak to the last
+     * row of the batch — this gives the most complete picture. When the
+     * batch would exceed max_payload_bytes it is split into chunks.
      *
-     * @param  bool  $force  bypass the min_flush_interval debounce
+     * @param  bool  $force  reserved for future use; flush is always unconditional now
      */
     public function flush(bool $force = false): void
     {
@@ -130,35 +160,39 @@ class RemoteHandler extends AbstractProcessingHandler
             return;
         }
 
-        if (! $force && $this->lastFlushAt !== null) {
-            $elapsedMs = (microtime(true) - $this->lastFlushAt) * 1000;
-            if ($elapsedMs < $this->minFlushIntervalMs) {
-                return;
+        if ($this->flushing) {
+            // Reentrant call (e.g. Octane::tick fires while onWrite is flushing).
+            return;
+        }
+
+        $this->flushing = true;
+
+        try {
+            $rows = $this->buffer;
+            $this->buffer = [];
+            $this->bufferBytes = 0;
+            $this->firstBufferedAt = null;
+
+            // Attach measures + memory to the last entry of the batch
+            $lastIdx = count($rows) - 1;
+            $measures = Context::get('measures');
+            if ($measures !== null) {
+                $rows[$lastIdx]['measures'] = json_encode($measures, JSON_UNESCAPED_UNICODE);
             }
-        }
-
-        $rows = $this->buffer;
-        $this->buffer = [];
-        $this->bufferBytes = 0;
-        $this->lastFlushAt = microtime(true);
-
-        // Attach measures + memory to the last entry of the batch
-        $lastIdx = count($rows) - 1;
-        $measures = Context::get('measures');
-        if ($measures !== null) {
-            $rows[$lastIdx]['measures'] = json_encode($measures, JSON_UNESCAPED_UNICODE);
-        }
-        if (config('owlogs.measure.memory', true)) {
-            $rows[$lastIdx]['memory_peak_mb'] = (int) round(memory_get_peak_usage(true) / 1024 / 1024);
-        }
-
-        foreach ($this->chunkBySize($rows) as $chunk) {
-            try {
-                SendLogsJob::dispatch($chunk);
-            } catch (Throwable) {
-                // Silent failure: queue backend may be unavailable.
-                // The local file channel (in parallel) still captures entries.
+            if (config('owlogs.measure.memory', true)) {
+                $rows[$lastIdx]['memory_peak_mb'] = (int) round(memory_get_peak_usage(true) / 1024 / 1024);
             }
+
+            foreach ($this->chunkBySize($rows) as $chunk) {
+                try {
+                    SendLogsJob::dispatch($chunk);
+                } catch (Throwable) {
+                    // Silent failure: queue backend may be unavailable.
+                    // The local file channel (in parallel) still captures entries.
+                }
+            }
+        } finally {
+            $this->flushing = false;
         }
     }
 

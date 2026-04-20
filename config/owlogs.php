@@ -46,17 +46,32 @@ return [
     | Transport
     |--------------------------------------------------------------------------
     |
-    | batch_size:            how many buffered log rows trigger a flush.
-    | max_payload_bytes:     soft cap on the JSON payload size; when exceeded,
-    |                        a flush is triggered (and the batch is split into
-    |                        chunks if a single flush would exceed it).
-    | min_flush_interval_ms: minimum delay between two soft-triggered flushes
-    |                        (batch_size / max_payload_bytes). Shutdown and
-    |                        Queue::after always force a flush.
-    | compression:           gzip the request body before sending.
-    | queue:                 queue name for the SendLogsJob.
-    | connection:            queue connection (null = default app connection).
-    | timeout_s:             HTTP timeout when the job POSTs to the server.
+    | The flush strategy is chosen automatically from the runtime:
+    |
+    |  - Non-Octane (PHP-FPM / Herd / Valet, artisan one-shot, queue:work):
+    |    records accumulate during the request/job/command and ship exactly
+    |    once at the boundary (terminating hook, Queue::after,
+    |    CommandFinished). One SendLogsJob per request, maximum.
+    |
+    |  - Octane (Swoole / RoadRunner / FrankenPHP, long-lived workers):
+    |    records batch across requests in the same worker. A flush fires
+    |    when either `octane.batch_count` records are buffered OR
+    |    `octane.window_ms` milliseconds have elapsed since the first
+    |    buffered record. Under Swoole a 1s tick enforces the window even
+    |    while the worker is idle; RR/FrankenPHP check on each request
+    |    boundary and at WorkerStopping.
+    |
+    | batch_size / max_payload_bytes stay as the per-process hard ceiling:
+    | they cap memory if a runaway caller logs faster than we can ship, and
+    | max_payload_bytes also drives the HTTP chunker. They are no longer
+    | used to trigger a mid-request flush.
+    |
+    | flush_strategy overrides runtime detection (testing / debugging):
+    | null → auto, 'octane' → OctaneWindowPolicy, 'end_of_request' →
+    | EndOfRequestPolicy.
+    |
+    | compression / queue / connection / timeout_s control the
+    | SendLogsJob's HTTP POST.
     |
     */
 
@@ -69,6 +84,11 @@ return [
         'queue' => env('OWLOGS_QUEUE', 'default'),
         'connection' => env('OWLOGS_QUEUE_CONNECTION'),
         'timeout_s' => env('OWLOGS_TIMEOUT', 30),
+        'octane' => [
+            'window_ms' => env('OWLOGS_OCTANE_WINDOW_MS', 2000),
+            'batch_count' => env('OWLOGS_OCTANE_BATCH_COUNT', 20),
+        ],
+        'flush_strategy' => env('OWLOGS_FLUSH_STRATEGY'),
     ],
 
     /*

@@ -6,6 +6,7 @@ namespace Skeylup\OwlogsAgent\Handlers;
 
 use Monolog\Level;
 use Monolog\Logger;
+use Skeylup\OwlogsAgent\Flushing\FlushPolicy;
 
 /**
  * Log channel factory for config/logging.php.
@@ -21,7 +22,11 @@ class RemoteLogChannel
 {
     public function __invoke(array $config): Logger
     {
-        $handler = new RemoteHandler(level: $config['level'] ?? Level::Debug);
+        $policy = app(FlushPolicy::class);
+        $handler = new RemoteHandler(
+            level: $config['level'] ?? Level::Debug,
+            policy: $policy,
+        );
 
         $logger = new Logger('owlogs');
         $logger->pushHandler($handler);
