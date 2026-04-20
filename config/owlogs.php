@@ -26,6 +26,23 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Auto-register on log stack
+    |--------------------------------------------------------------------------
+    |
+    | When true, the service provider defines the `owlogs` channel at boot
+    | (if not already declared in config/logging.php) and appends it to the
+    | `stack` channel — so any `Log::*()` call is forwarded to Owlogs without
+    | the user touching LOG_STACK or config/logging.php.
+    |
+    | Set to false to wire it manually (e.g. add `owlogs` to LOG_STACK, or
+    | declare a custom channel definition in config/logging.php).
+    |
+    */
+
+    'auto_register_stack' => env('OWLOGS_AUTO_REGISTER_STACK', true),
+
+    /*
+    |--------------------------------------------------------------------------
     | Transport
     |--------------------------------------------------------------------------
     |

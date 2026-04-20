@@ -36,39 +36,59 @@ Drop-in, zero-config, Octane-safe. Works with Laravel 11, 12 and 13.
 
 ```bash
 composer require skeylup/owlogs-agent
-php artisan vendor:publish --tag=owlogs-agent-config
 ```
 
-Add your workspace API key in `.env` — you can grab it from your workspace's **API keys** page on [owlogs.com](https://www.owlogs.com):
+Add your workspace API key to `.env` — grab it from your workspace's **API keys** page on [owlogs.com](https://www.owlogs.com):
 
 ```env
 OWLOGS_API_KEY=owl_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
-Register the `owlogs` channel in `config/logging.php`:
+That's it. With `LOG_CHANNEL=stack` (Laravel's default), any `Log::info(...)`, `Log::error(...)`, etc. is now shipped to Owlogs asynchronously via a queue job — the agent registers the `owlogs` channel on boot and appends it to your `stack` channel for you. No edits to `config/logging.php` or `LOG_STACK` required.
+
+Prefer remote-only shipping? Set `LOG_CHANNEL=owlogs`.
+
+If `OWLOGS_API_KEY` is empty, the queue job is still dispatched but returns silently without hitting the network — handy for local development.
+
+If the project uses [Laravel Boost](https://github.com/laravel/boost), run `php artisan boost:update` to pick up the bundled AI instrumentation skill — your AI assistant will then know how to add workflow-level logging across the app automatically.
+
+### Customising the config (optional)
+
+Only publish the config file when you actually want to tweak something beyond env vars:
+
+```bash
+php artisan vendor:publish --tag=owlogs-agent-config
+```
+
+### Opt out of auto-registration
+
+If you'd rather wire things manually (custom stack logic, explicit `LOG_STACK`, or an alternate channel definition), set:
+
+```env
+OWLOGS_AUTO_REGISTER_STACK=false
+```
+
+Then declare the channel yourself in `config/logging.php`:
 
 ```php
-'channels' => [
-    // ...
-
-    'owlogs' => [
-        'driver' => 'custom',
-        'via'    => \Skeylup\OwlogsAgent\Handlers\RemoteLogChannel::class,
-        'level'  => env('LOG_LEVEL', 'debug'),
-        'tap'    => [\Skeylup\OwlogsAgent\LogContextTap::class],
-    ],
-
-    'stack' => [
-        'driver'            => 'stack',
-        'channels'          => explode(',', (string) env('LOG_STACK', 'single,owlogs')),
-        'ignore_exceptions' => false,
-    ],
+'owlogs' => [
+    'driver' => 'custom',
+    'via'    => \Skeylup\OwlogsAgent\Handlers\RemoteLogChannel::class,
+    'level'  => env('LOG_LEVEL', 'debug'),
+    'tap'    => [\Skeylup\OwlogsAgent\LogContextTap::class],
 ],
 ```
 
-Set `LOG_CHANNEL=stack` (or `LOG_CHANNEL=owlogs` if you only want remote shipping) and any `Log::info(...)`, `Log::error(...)` etc. will be sent to the Owlogs server asynchronously via a queue job.
+…and add `owlogs` to your `LOG_STACK` (e.g. `LOG_STACK=single,owlogs`).
 
-If `OWLOGS_API_KEY` is empty, the queue job is still dispatched but returns silently without hitting the network — useful for local development.
+### Upgrading from an earlier version
+
+Earlier versions required you to declare the `owlogs` channel in `config/logging.php` and list it in `LOG_STACK` by hand. Both are now done at boot. After upgrading you can safely:
+
+- Remove the manual `'owlogs' => [...]` entry from `config/logging.php`.
+- Drop `owlogs` from `LOG_STACK` in `.env` (e.g. `LOG_STACK=single`).
+
+Either is also fine to keep — a pre-existing channel definition is never overwritten, and the stack injection skips `owlogs` if it's already present.
 
 ---
 
@@ -204,6 +224,7 @@ All of the following can be overridden in `config/owlogs.php` after publishing.
 |---|---|---|
 | `OWLOGS_ENABLED` | `true` | Master kill-switch |
 | `OWLOGS_API_KEY` | — | Workspace API key (sent as `X-Api-Key`) |
+| `OWLOGS_AUTO_REGISTER_STACK` | `true` | Auto-define the `owlogs` channel and append it to `stack` on boot |
 | `OWLOGS_BATCH_SIZE` | `50` | Buffer size before a flush |
 | `OWLOGS_QUEUE` | `default` | Queue name for `SendLogsJob` |
 | `OWLOGS_QUEUE_CONNECTION` | — | Queue connection (null = app default) |
@@ -277,7 +298,7 @@ Expected responses:
 
 **Jobs pile up in the `failed_jobs` table.** Check the exception: if it's `401` / `403`, your `OWLOGS_API_KEY` is wrong or the key was rotated — regenerate it from your workspace and update `.env`.
 
-**Logs never arrive.** Run `php artisan queue:work` — without a worker, dispatched `SendLogsJob` will never execute. Also verify `OWLOGS_API_KEY` is set (empty key = silent no-op).
+**Logs never arrive.** Run `php artisan queue:work` — without a worker, dispatched `SendLogsJob` will never execute. Also verify `OWLOGS_API_KEY` is set (empty key = silent no-op), and that `LOG_CHANNEL=stack` (or `LOG_CHANNEL=owlogs`) — if `LOG_CHANNEL` points to a non-stack channel (e.g. `single`), the auto-registered `owlogs` entry in `stack` is bypassed.
 
 **Octane complains about bindings.** The agent does not use container / request / config injection in singletons. If you see such warnings, they come from elsewhere in your app.
 

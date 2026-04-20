@@ -21,6 +21,7 @@ use Laravel\Octane\Events\RequestTerminated;
 use Laravel\Octane\Events\TaskTerminated;
 use Laravel\Octane\Events\WorkerStopping;
 use Skeylup\OwlogsAgent\Handlers\RemoteHandler;
+use Skeylup\OwlogsAgent\Handlers\RemoteLogChannel;
 use Skeylup\OwlogsAgent\Middleware\AddLogContext;
 
 class OwlogsAgentServiceProvider extends ServiceProvider
@@ -39,6 +40,8 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             return;
         }
 
+        $this->registerLogChannel();
+
         /** @var Kernel $kernel */
         $kernel = $this->app->make(Kernel::class);
         $kernel->prependMiddleware(AddLogContext::class);
@@ -52,6 +55,43 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             $this->publishes([
                 __DIR__.'/../config/owlogs.php' => config_path('owlogs.php'),
             ], 'owlogs-agent-config');
+        }
+    }
+
+    /**
+     * Auto-define the `owlogs` log channel and (optionally) append it to the
+     * `stack` channel so consumers don't have to edit config/logging.php or
+     * LOG_STACK for logs to flow.
+     *
+     * A pre-existing `owlogs` channel definition is never overwritten, and
+     * the stack injection preserves any custom channel list the user had
+     * already built (e.g. array_filter([...slack_dedup...])).
+     */
+    private function registerLogChannel(): void
+    {
+        if (! config()->has('logging.channels.owlogs')) {
+            config(['logging.channels.owlogs' => [
+                'driver' => 'custom',
+                'via' => RemoteLogChannel::class,
+                'level' => env('LOG_LEVEL', 'debug'),
+                'tap' => [LogContextTap::class],
+            ]]);
+        }
+
+        if (! config('owlogs.auto_register_stack', true)) {
+            return;
+        }
+
+        // Only inject into `stack` if the user actually has one; avoid
+        // materialising a half-baked stack definition otherwise.
+        if (! config()->has('logging.channels.stack.channels')) {
+            return;
+        }
+
+        $stack = (array) config('logging.channels.stack.channels', []);
+
+        if (! in_array('owlogs', $stack, true)) {
+            config(['logging.channels.stack.channels' => [...$stack, 'owlogs']]);
         }
     }
 
