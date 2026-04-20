@@ -6,6 +6,10 @@ namespace Skeylup\OwlogsAgent;
 
 use Illuminate\Console\Events\CommandFinished;
 use Illuminate\Console\Events\CommandStarting;
+use Illuminate\Console\Events\ScheduledTaskFailed;
+use Illuminate\Console\Events\ScheduledTaskFinished;
+use Illuminate\Console\Events\ScheduledTaskSkipped;
+use Illuminate\Console\Events\ScheduledTaskStarting;
 use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Log\Context\Repository;
 use Illuminate\Queue\Events\JobProcessed;
@@ -93,6 +97,7 @@ class OwlogsAgentServiceProvider extends ServiceProvider
 
         $this->registerQueueContext();
         $this->registerCommandContext();
+        $this->registerScheduleContext();
         $this->registerAutoInstrumentation();
         $this->registerAutoLogger();
         $this->registerFlushHooks();
@@ -418,6 +423,85 @@ class OwlogsAgentServiceProvider extends ServiceProvider
 
             $this->onRequestBoundary();
         });
+    }
+
+    /**
+     * Register context enrichment for scheduled tasks (Schedule::job/call/command).
+     *
+     * Without this, jobs dispatched via Schedule::job() inherit an empty Context
+     * because schedule:run is excluded from CommandStarting handling — the job is
+     * dispatched inside the schedule:run process before any trace_id is set.
+     */
+    private function registerScheduleContext(): void
+    {
+        if (! config('owlogs.commands.enabled', true)) {
+            return;
+        }
+
+        $startTime = null;
+
+        Event::listen(ScheduledTaskStarting::class, function (ScheduledTaskStarting $event) use (&$startTime): void {
+            $fields = config('owlogs.fields', []);
+            $startTime = hrtime(true);
+
+            if ($fields['trace_id'] ?? true) {
+                Context::add('trace_id', (string) Str::ulid());
+            }
+
+            if ($fields['span_id'] ?? true) {
+                Context::add('span_id', Context::get('trace_id') ?? (string) Str::ulid());
+            }
+
+            if ($fields['origin'] ?? true) {
+                Context::add('origin', 'schedule');
+            }
+
+            if ($fields['app_name'] ?? true) {
+                Context::addIf('app_name', (string) config('app.name'));
+            }
+            if ($fields['app_env'] ?? true) {
+                Context::addIf('app_env', (string) config('app.env'));
+            }
+            if ($fields['app_url'] ?? true) {
+                Context::addIf('app_url', (string) config('app.url'));
+            }
+
+            if ($fields['git_sha'] ?? true) {
+                $sha = AddLogContext::resolveGitSha();
+                if ($sha !== null) {
+                    Context::addIf('git_sha', $sha);
+                }
+            }
+
+            Context::add('scheduled_task', $event->task->getSummaryForDisplay());
+        });
+
+        $cleanup = function ($event) use (&$startTime): void {
+            $fields = config('owlogs.fields', []);
+
+            if (($fields['duration_ms'] ?? true) && $startTime !== null) {
+                $durationMs = (int) round((hrtime(true) - $startTime) / 1_000_000);
+                Context::add('duration_ms', $durationMs);
+
+                Context::push('measures', [
+                    'label' => 'scheduled_task',
+                    'duration_ms' => (float) $durationMs,
+                    'meta' => ['task' => $event->task->getSummaryForDisplay()],
+                ]);
+            }
+
+            $startTime = null;
+
+            $this->onRequestBoundary();
+
+            foreach (['trace_id', 'span_id', 'origin', 'scheduled_task', 'duration_ms'] as $key) {
+                Context::forget($key);
+            }
+        };
+
+        Event::listen(ScheduledTaskFinished::class, $cleanup);
+        Event::listen(ScheduledTaskFailed::class, $cleanup);
+        Event::listen(ScheduledTaskSkipped::class, $cleanup);
     }
 
     /**
