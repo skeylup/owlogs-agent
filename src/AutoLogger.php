@@ -15,7 +15,6 @@ use Illuminate\Console\Events\ScheduledTaskFailed;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Events\MigrationEnded;
 use Illuminate\Database\Events\QueryExecuted;
-use Illuminate\Database\Events\TransactionCommitted;
 use Illuminate\Http\Client\Events\ConnectionFailed;
 use Illuminate\Http\Client\Events\ResponseReceived;
 use Illuminate\Mail\Events\MessageSending;
@@ -292,14 +291,6 @@ class AutoLogger
                     'duration_ms' => round($query->time, 2),
                     'connection' => $query->connectionName,
                     'caller' => $this->resolveQueryCaller(),
-                ]);
-            });
-        }
-
-        if ($config['db_transaction'] ?? false) {
-            Event::listen(TransactionCommitted::class, function (TransactionCommitted $event): void {
-                Log::debug('db.transaction.committed: '.$event->connectionName, [
-                    'connection' => $event->connectionName,
                 ]);
             });
         }

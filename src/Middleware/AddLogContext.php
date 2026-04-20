@@ -9,6 +9,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Context;
 use Illuminate\Support\Str;
 use Skeylup\OwlogsAgent\Contracts\HasLogContext;
+use Skeylup\OwlogsAgent\Handlers\RemoteHandler;
 use Symfony\Component\HttpFoundation\Response;
 
 class AddLogContext
@@ -25,6 +26,10 @@ class AddLogContext
     {
         if (! config('owlogs.enabled', true)) {
             return $next($request);
+        }
+
+        if ($this->isIgnored($request)) {
+            return RemoteHandler::suppressedWhile(fn () => $next($request));
         }
 
         $fields = config('owlogs.fields', []);
@@ -157,6 +162,28 @@ class AddLogContext
         }
 
         return $response;
+    }
+
+    private function isIgnored(Request $request): bool
+    {
+        $patterns = (array) config('owlogs.ignored_uris', []);
+
+        if ($patterns === []) {
+            return false;
+        }
+
+        $path = ltrim($request->path(), '/');
+
+        foreach ($patterns as $pattern) {
+            if (! is_string($pattern) || $pattern === '') {
+                continue;
+            }
+            if (Str::is(ltrim($pattern, '/'), $path)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function applyUriResolver(Request $request, array $fields): void

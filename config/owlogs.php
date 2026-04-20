@@ -183,6 +183,24 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Ignored URIs
+    |--------------------------------------------------------------------------
+    |
+    | HTTP request paths whose logs must never be forwarded to Owlogs. Matched
+    | with `Str::is`, so wildcards (`*`) are supported.
+    |
+    | Laravel's built-in `broadcasting/auth` endpoint fires on every websocket
+    | handshake and creates a lot of low-signal noise, so it is ignored by
+    | default. Set `OWLOGS_IGNORE_BROADCASTING=false` to forward it again.
+    |
+    */
+
+    'ignored_uris' => array_values(array_filter([
+        env('OWLOGS_IGNORE_BROADCASTING', true) ? 'broadcasting/auth' : null,
+    ])),
+
+    /*
+    |--------------------------------------------------------------------------
     | Auto-Logging
     |--------------------------------------------------------------------------
     */
@@ -210,12 +228,11 @@ return [
         // Database
         'slow_query' => env('OWLOGS_AUTO_SLOW_QUERY', true),
         'slow_query_ms' => env('OWLOGS_AUTO_SLOW_QUERY_MS', 500),
-        'db_transaction' => env('OWLOGS_AUTO_DB_TRANSACTION', true),
         'migration' => env('OWLOGS_AUTO_MIGRATION', false),
 
         // Cache
-        'cache_miss' => env('OWLOGS_AUTO_CACHE_MISS', true),
-        'cache_hit' => env('OWLOGS_AUTO_CACHE_HIT', true),
+        'cache_miss' => env('OWLOGS_AUTO_CACHE_MISS', false),
+        'cache_hit' => env('OWLOGS_AUTO_CACHE_HIT', false),
 
         // HTTP Client (outgoing)
         'http_client' => env('OWLOGS_AUTO_HTTP_CLIENT', true),

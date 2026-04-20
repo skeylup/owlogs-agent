@@ -207,9 +207,8 @@ Most lifecycle events are captured automatically out of the box. Flip any switch
 | `OWLOGS_AUTO_NOTIFICATION_FAILED` | `true` | Notification failed |
 | `OWLOGS_AUTO_SLOW_QUERY`      | `true`  | Queries slower than the threshold below |
 | `OWLOGS_AUTO_SLOW_QUERY_MS`   | `500`   | Slow-query threshold in ms |
-| `OWLOGS_AUTO_DB_TRANSACTION`  | `true`  | DB transaction committed |
 | `OWLOGS_AUTO_MIGRATION`       | `false` | Migration ran (opt-in — noisy on deploys) |
-| `OWLOGS_AUTO_CACHE_HIT` / `OWLOGS_AUTO_CACHE_MISS` | `true` | Cache events |
+| `OWLOGS_AUTO_CACHE_HIT` / `OWLOGS_AUTO_CACHE_MISS` | `false` | Cache events (opt-in — very high volume) |
 | `OWLOGS_AUTO_HTTP_CLIENT`     | `true`  | Outgoing HTTP client errors (>= 4xx) |
 | `OWLOGS_AUTO_SCHEDULE`        | `false` | Scheduled task failed (opt-in) |
 | `OWLOGS_AUTO_MODEL_CHANGES`   | `true`  | Eloquent created / updated / deleted (scoped via `model_changes_models`) |
@@ -239,6 +238,26 @@ All of the following can be overridden in `config/owlogs.php` after publishing.
 | `OWLOGS_N_PLUS_ONE_THRESHOLD` | `5` | Identical-SQL count to flag as N+1 |
 
 Individual context fields can be toggled under `config('owlogs.fields')` if you want to opt out of e.g. `ip` or `user_agent`.
+
+### Ignoring noisy URIs
+
+`config('owlogs.ignored_uris')` is a list of path patterns (matched with `Str::is`, so `*` is supported) whose logs are dropped before hitting the transport.
+
+Laravel's `broadcasting/auth` endpoint fires on every websocket handshake and usually has no signal — it is ignored by default. Set `OWLOGS_IGNORE_BROADCASTING=false` to forward it again.
+
+Add your own after publishing the config:
+
+```php
+'ignored_uris' => [
+    'broadcasting/auth',
+    'horizon/*',
+    'health',
+],
+```
+
+| Env var | Default | Description |
+|---|---|---|
+| `OWLOGS_IGNORE_BROADCASTING` | `true` | Append `broadcasting/auth` to `ignored_uris` |
 
 ---
 
