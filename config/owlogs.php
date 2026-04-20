@@ -183,61 +183,52 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Tenant Resolver
-    |--------------------------------------------------------------------------
-    */
-
-    'tenant_resolver' => null,
-
-    /*
-    |--------------------------------------------------------------------------
     | Auto-Logging
     |--------------------------------------------------------------------------
     */
 
     'auto_log' => [
         // Jobs / Queue
-        'job_dispatched' => env('OWLOGS_AUTO_JOB_DISPATCHED', false),
-        'job_started' => env('OWLOGS_AUTO_JOB_STARTED', false),
-        'job_completed' => env('OWLOGS_AUTO_JOB_COMPLETED', false),
-        'job_failed' => env('OWLOGS_AUTO_JOB_FAILED', false),
-        'job_retrying' => env('OWLOGS_AUTO_JOB_RETRYING', false),
+        'job_dispatched' => env('OWLOGS_AUTO_JOB_DISPATCHED', true),
+        'job_started' => env('OWLOGS_AUTO_JOB_STARTED', true),
+        'job_completed' => env('OWLOGS_AUTO_JOB_COMPLETED', true),
+        'job_failed' => env('OWLOGS_AUTO_JOB_FAILED', true),
+        'job_retrying' => env('OWLOGS_AUTO_JOB_RETRYING', true),
 
         // Auth
-        'auth_login' => env('OWLOGS_AUTO_AUTH_LOGIN', false),
-        'auth_failed' => env('OWLOGS_AUTO_AUTH_FAILED', false),
-        'auth_logout' => env('OWLOGS_AUTO_AUTH_LOGOUT', false),
-        'auth_password_reset' => env('OWLOGS_AUTO_AUTH_PASSWORD_RESET', false),
-        'auth_verified' => env('OWLOGS_AUTO_AUTH_VERIFIED', false),
+        'auth_login' => env('OWLOGS_AUTO_AUTH_LOGIN', true),
+        'auth_failed' => env('OWLOGS_AUTO_AUTH_FAILED', true),
+        'auth_logout' => env('OWLOGS_AUTO_AUTH_LOGOUT', true),
+        'auth_password_reset' => env('OWLOGS_AUTO_AUTH_PASSWORD_RESET', true),
+        'auth_verified' => env('OWLOGS_AUTO_AUTH_VERIFIED', true),
 
         // Mail / Notifications
-        'mail_sent' => env('OWLOGS_AUTO_MAIL_SENT', false),
-        'mail_failed' => env('OWLOGS_AUTO_MAIL_FAILED', false),
-        'notification_sent' => env('OWLOGS_AUTO_NOTIFICATION_SENT', false),
-        'notification_failed' => env('OWLOGS_AUTO_NOTIFICATION_FAILED', false),
+        'mail_sent' => env('OWLOGS_AUTO_MAIL_SENT', true),
+        'notification_sent' => env('OWLOGS_AUTO_NOTIFICATION_SENT', true),
+        'notification_failed' => env('OWLOGS_AUTO_NOTIFICATION_FAILED', true),
 
         // Database
-        'slow_query' => env('OWLOGS_AUTO_SLOW_QUERY', false),
+        'slow_query' => env('OWLOGS_AUTO_SLOW_QUERY', true),
         'slow_query_ms' => env('OWLOGS_AUTO_SLOW_QUERY_MS', 500),
-        'db_transaction' => env('OWLOGS_AUTO_DB_TRANSACTION', false),
+        'db_transaction' => env('OWLOGS_AUTO_DB_TRANSACTION', true),
         'migration' => env('OWLOGS_AUTO_MIGRATION', false),
 
         // Cache
-        'cache_miss' => env('OWLOGS_AUTO_CACHE_MISS', false),
-        'cache_hit' => env('OWLOGS_AUTO_CACHE_HIT', false),
+        'cache_miss' => env('OWLOGS_AUTO_CACHE_MISS', true),
+        'cache_hit' => env('OWLOGS_AUTO_CACHE_HIT', true),
 
         // HTTP Client (outgoing)
-        'http_client' => env('OWLOGS_AUTO_HTTP_CLIENT', false),
+        'http_client' => env('OWLOGS_AUTO_HTTP_CLIENT', true),
 
         // Scheduler
         'schedule' => env('OWLOGS_AUTO_SCHEDULE', false),
 
         // Model changes
-        'model_changes' => env('OWLOGS_AUTO_MODEL_CHANGES', false),
+        'model_changes' => env('OWLOGS_AUTO_MODEL_CHANGES', true),
         'model_changes_models' => null,
 
         // Event dispatch
-        'event_dispatch' => env('OWLOGS_AUTO_EVENT_DISPATCH', false),
+        'event_dispatch' => env('OWLOGS_AUTO_EVENT_DISPATCH', true),
     ],
 
 ];

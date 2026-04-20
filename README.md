@@ -17,7 +17,7 @@ Drop-in, zero-config, Octane-safe. Works with Laravel 11, 12 and 13.
 
 ## Features
 
-- **Automatic context enrichment** on every log entry: `trace_id`, `span_id`, `origin`, `user_id`, `tenant_id`, `app_env`, `git_sha`, `uri`, `route_name`, `route_action`, `ip`, `duration_ms`, etc.
+- **Automatic context enrichment** on every log entry: `trace_id`, `span_id`, `origin`, `user_id`, `app_name`, `app_env`, `app_url`, `git_sha`, `uri`, `route_name`, `route_action`, `ip`, `user_agent`, `duration_ms`, etc.
 - **Distributed tracing**: the same `trace_id` flows from an HTTP request into every queue job it dispatches, so you can reconstruct the full lifetime of a request.
 - **Caller location**: each log entry carries the `file:line` and `Class@method` where `Log::*()` was actually called — not the framework frame.
 - **Queue job metadata**: job class, attempt, queue, connection, plus the public (scalar) properties of the job payload.
@@ -105,11 +105,11 @@ Either is also fine to keep — a pre-existing channel definition is never overw
                                                           X-Api-Key: owl_…
 ```
 
-1. Global middleware `AddLogContext` populates Laravel's `Context` facade on every HTTP request with the tracing, routing, user, tenant and timing fields.
+1. Global middleware `AddLogContext` populates Laravel's `Context` facade on every HTTP request with the tracing, routing, user and timing fields. The same context is propagated to queue jobs via `Context::hydrated`, and to artisan commands via `CommandStarting`.
 2. `LogContextTap` attaches a Monolog processor that resolves the **real** caller frame (skipping framework internals) and sets a JSON formatter.
-3. `RemoteHandler` buffers log records in memory (default 50) and flushes either on batch-size, on `register_shutdown_function`, or after each queue job completes (`Queue::after`).
-4. Flushing dispatches a `SendLogsJob` that `POST`s the batch as JSON to `https://www.owlogs.com/api/owlogs/ingest` with `X-Api-Key: {OWLOGS_API_KEY}`.
-5. The job retries 5 times with backoff `[2, 5, 15, 60, 180]` seconds on 5xx / network errors, and abandons on 4xx (bad key, invalid payload).
+3. `RemoteHandler` buffers log records in memory (default 50) and flushes on batch-size, on soft payload-size cap, on `register_shutdown_function`, after each queue job completes (`Queue::after`), or on Octane lifecycle events (`RequestTerminated`, `TaskTerminated`, `WorkerStopping`). Soft-triggered flushes are debounced via `OWLOGS_MIN_FLUSH_INTERVAL_MS`; forced flushes bypass it.
+4. Flushing dispatches a `SendLogsJob` that `POST`s the batch as JSON (optionally gzipped) to `https://www.owlogs.com/api/owlogs/ingest` with `X-Api-Key: {OWLOGS_API_KEY}`. Batches larger than `OWLOGS_MAX_PAYLOAD_BYTES` are split into multiple jobs.
+5. The job retries 3 times with backoff `[5, 30, 120]` seconds on 5xx / network errors, and abandons without retry on 4xx (bad key, invalid payload), `403` (no active subscription) and `429` (quota exhausted).
 
 ---
 
@@ -188,31 +188,32 @@ Breadcrumbs are persisted as a `breadcrumbs` JSON array on every log entry of th
 
 ## Auto-logging lifecycle events
 
-Enable any combination of the following in `.env` — all default to `false`:
+Most lifecycle events are captured automatically out of the box. Flip any switch to `false` in `.env` to disable a category.
 
-| Env var | Event |
-|---|---|
-| `OWLOGS_AUTO_JOB_DISPATCHED`  | A job is queued |
-| `OWLOGS_AUTO_JOB_STARTED`     | A worker picks up a job |
-| `OWLOGS_AUTO_JOB_COMPLETED`   | A job completes successfully |
-| `OWLOGS_AUTO_JOB_FAILED`      | A job fails (exception + attempt) |
-| `OWLOGS_AUTO_JOB_RETRYING`    | A retry is requested |
-| `OWLOGS_AUTO_AUTH_LOGIN`      | User logs in (email, IP, UA) |
-| `OWLOGS_AUTO_AUTH_FAILED`     | Failed login attempt |
-| `OWLOGS_AUTO_AUTH_LOGOUT`     | User logs out |
-| `OWLOGS_AUTO_AUTH_PASSWORD_RESET` | Password reset completed |
-| `OWLOGS_AUTO_AUTH_VERIFIED`   | Email verified |
-| `OWLOGS_AUTO_MAIL_SENT`       | Mail sending / sent |
-| `OWLOGS_AUTO_NOTIFICATION_SENT` | Notification dispatched |
-| `OWLOGS_AUTO_NOTIFICATION_FAILED` | Notification failed |
-| `OWLOGS_AUTO_SLOW_QUERY`      | Queries slower than `OWLOGS_AUTO_SLOW_QUERY_MS` (default 500) |
-| `OWLOGS_AUTO_DB_TRANSACTION`  | DB transaction committed |
-| `OWLOGS_AUTO_MIGRATION`       | Migration ran |
-| `OWLOGS_AUTO_CACHE_HIT` / `OWLOGS_AUTO_CACHE_MISS` | Cache events |
-| `OWLOGS_AUTO_HTTP_CLIENT`     | Outgoing HTTP client errors (>= 4xx) |
-| `OWLOGS_AUTO_SCHEDULE`        | Scheduled task failed |
-| `OWLOGS_AUTO_MODEL_CHANGES`   | Eloquent created / updated / deleted (scoped via `model_changes_models`) |
-| `OWLOGS_AUTO_EVENT_DISPATCH`  | App-level events (excluding framework internals) |
+| Env var | Default | Event |
+|---|---|---|
+| `OWLOGS_AUTO_JOB_DISPATCHED`  | `true`  | A job is queued |
+| `OWLOGS_AUTO_JOB_STARTED`     | `true`  | A worker picks up a job |
+| `OWLOGS_AUTO_JOB_COMPLETED`   | `true`  | A job completes successfully |
+| `OWLOGS_AUTO_JOB_FAILED`      | `true`  | A job fails (exception + attempt) |
+| `OWLOGS_AUTO_JOB_RETRYING`    | `true`  | A retry is requested |
+| `OWLOGS_AUTO_AUTH_LOGIN`      | `true`  | User logs in (email, IP, UA) |
+| `OWLOGS_AUTO_AUTH_FAILED`     | `true`  | Failed login attempt |
+| `OWLOGS_AUTO_AUTH_LOGOUT`     | `true`  | User logs out |
+| `OWLOGS_AUTO_AUTH_PASSWORD_RESET` | `true` | Password reset completed |
+| `OWLOGS_AUTO_AUTH_VERIFIED`   | `true`  | Email verified |
+| `OWLOGS_AUTO_MAIL_SENT`       | `true`  | Mail sending / sent |
+| `OWLOGS_AUTO_NOTIFICATION_SENT` | `true` | Notification dispatched |
+| `OWLOGS_AUTO_NOTIFICATION_FAILED` | `true` | Notification failed |
+| `OWLOGS_AUTO_SLOW_QUERY`      | `true`  | Queries slower than the threshold below |
+| `OWLOGS_AUTO_SLOW_QUERY_MS`   | `500`   | Slow-query threshold in ms |
+| `OWLOGS_AUTO_DB_TRANSACTION`  | `true`  | DB transaction committed |
+| `OWLOGS_AUTO_MIGRATION`       | `false` | Migration ran (opt-in — noisy on deploys) |
+| `OWLOGS_AUTO_CACHE_HIT` / `OWLOGS_AUTO_CACHE_MISS` | `true` | Cache events |
+| `OWLOGS_AUTO_HTTP_CLIENT`     | `true`  | Outgoing HTTP client errors (>= 4xx) |
+| `OWLOGS_AUTO_SCHEDULE`        | `false` | Scheduled task failed (opt-in) |
+| `OWLOGS_AUTO_MODEL_CHANGES`   | `true`  | Eloquent created / updated / deleted (scoped via `model_changes_models`) |
+| `OWLOGS_AUTO_EVENT_DISPATCH`  | `true`  | App-level events (excluding framework internals) |
 
 ---
 
@@ -225,7 +226,10 @@ All of the following can be overridden in `config/owlogs.php` after publishing.
 | `OWLOGS_ENABLED` | `true` | Master kill-switch |
 | `OWLOGS_API_KEY` | — | Workspace API key (sent as `X-Api-Key`) |
 | `OWLOGS_AUTO_REGISTER_STACK` | `true` | Auto-define the `owlogs` channel and append it to `stack` on boot |
-| `OWLOGS_BATCH_SIZE` | `50` | Buffer size before a flush |
+| `OWLOGS_BATCH_SIZE` | `50` | Buffered row count that triggers a flush |
+| `OWLOGS_MAX_PAYLOAD_BYTES` | `524288` | Soft cap on JSON payload size; triggers a flush and splits oversized batches |
+| `OWLOGS_MIN_FLUSH_INTERVAL_MS` | `500` | Minimum delay between soft-triggered flushes (shutdown / `Queue::after` / Octane events always force-flush) |
+| `OWLOGS_COMPRESSION` | `true` | Gzip the request body before POSTing |
 | `OWLOGS_QUEUE` | `default` | Queue name for `SendLogsJob` |
 | `OWLOGS_QUEUE_CONNECTION` | — | Queue connection (null = app default) |
 | `OWLOGS_TIMEOUT` | `30` | HTTP timeout in seconds |
@@ -264,7 +268,6 @@ For transparency, here's what each flush POSTs to Owlogs:
       "user_agent": "Mozilla/5.0 …",
       "request_input": "{\"amount\":1000,\"currency\":\"EUR\"}",
       "user_id": 42,
-      "tenant_id": 3,
       "app_name": "Example App",
       "app_env": "production",
       "app_url": "https://app.example.com",
@@ -288,9 +291,10 @@ For transparency, here's what each flush POSTs to Owlogs:
 
 Expected responses:
 
-- `202 Accepted` → `{"accepted": <count>}` — the agent moves on
-- `4xx` → the job is **not retried** (fix the key / payload)
-- `5xx` or network error → retried up to 5 times with backoff
+- `2xx` → the agent moves on (server replies `{"accepted": <count>}`)
+- `403` (no active subscription) or `429` (quota exhausted) → the job fails immediately, no retry
+- Any other `4xx` → not retried (fix the key / payload)
+- `5xx` or network error → retried up to 3 times with backoff `[5, 30, 120]` seconds
 
 ---
 
