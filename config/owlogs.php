@@ -46,32 +46,53 @@ return [
     | Transport
     |--------------------------------------------------------------------------
     |
-    | The flush strategy is chosen automatically from the runtime:
+    | Two-stage ship pipeline:
+    |
+    |  [RAM buffer in RemoteHandler] → flush → [cross-process LogBufferStore]
+    |        → debounced dispatch → [ShipBufferedLogsJob] → HTTPS POST
+    |
+    | Stage 1 — when RAM records leave the current PHP process:
     |
     |  - Non-Octane (PHP-FPM / Herd / Valet, artisan one-shot, queue:work):
-    |    records accumulate during the request/job/command and ship exactly
+    |    records accumulate during the request/job/command and flush exactly
     |    once at the boundary (terminating hook, Queue::after,
-    |    CommandFinished). One SendLogsJob per request, maximum.
-    |
+    |    CommandFinished).
     |  - Octane (Swoole / RoadRunner / FrankenPHP, long-lived workers):
     |    records batch across requests in the same worker. A flush fires
     |    when either `octane.batch_count` records are buffered OR
-    |    `octane.window_ms` milliseconds have elapsed since the first
-    |    buffered record. Under Swoole a 1s tick enforces the window even
-    |    while the worker is idle; RR/FrankenPHP check on each request
-    |    boundary and at WorkerStopping.
+    |    `octane.window_ms` ms have elapsed since the first buffered record.
+    |    Under Swoole a 1s tick enforces the window during idle periods.
     |
-    | batch_size / max_payload_bytes stay as the per-process hard ceiling:
-    | they cap memory if a runaway caller logs faster than we can ship, and
-    | max_payload_bytes also drives the HTTP chunker. They are no longer
-    | used to trigger a mid-request flush.
+    | Stage 2 — when the store's accumulated rows are shipped to Owlogs:
     |
-    | flush_strategy overrides runtime detection (testing / debugging):
+    |  - Every flush APPENDs its rows to `buffer_store` (Redis list or
+    |    JSONL file) and tries to dispatch ONE ShipBufferedLogsJob with
+    |    `ship.debounce_ms` delay. A Cache::add marker keeps the window
+    |    single-job: N flushes in the debounce window → 1 queued ship job.
+    |  - ShipBufferedLogsJob drains up to `ship.batch_count` rows, splits
+    |    the payload by `max_payload_bytes` and POSTs each chunk. While
+    |    the store still has pending rows at the end of handle(), it
+    |    self-re-dispatches without delay.
+    |
+    | Legacy caps (still honored):
+    |
+    |  - `batch_size * 2` / `max_payload_bytes * 2` act as RAM hard
+    |    ceilings in RemoteHandler::write() to protect against runaway
+    |    log loops during a single request.
+    |  - `max_payload_bytes` drives the HTTP chunker inside the ship job.
+    |
+    | `flush_strategy` overrides runtime detection (testing / debugging):
     | null → auto, 'octane' → OctaneWindowPolicy, 'end_of_request' →
     | EndOfRequestPolicy.
     |
-    | compression / queue / connection / timeout_s control the
-    | SendLogsJob's HTTP POST.
+    | `buffer_store` picks the cross-process buffer:
+    |  - 'redis' (default): Redis list, atomic Lua-scripted drain. Best
+    |    performance, requires a `redis_connection` (default 'default').
+    |  - 'file': JSONL file with advisory flock(). Zero dependencies,
+    |    filesystem must be writable. Suitable for Herd / single-server
+    |    setups without Redis.
+    |  - 'memory': process-local, testing only — not shared with the
+    |    queue worker running ShipBufferedLogsJob.
     |
     */
 
@@ -84,10 +105,22 @@ return [
         'queue' => env('OWLOGS_QUEUE', 'default'),
         'connection' => env('OWLOGS_QUEUE_CONNECTION'),
         'timeout_s' => env('OWLOGS_TIMEOUT', 30),
+
+        'buffer_store' => env('OWLOGS_BUFFER_STORE', 'redis'),
+        'redis_connection' => env('OWLOGS_BUFFER_REDIS_CONNECTION', 'default'),
+        'redis_key' => env('OWLOGS_BUFFER_REDIS_KEY', 'owlogs:buffer'),
+        'file_path' => env('OWLOGS_BUFFER_FILE_PATH'),
+
+        'ship' => [
+            'debounce_ms' => env('OWLOGS_SHIP_DEBOUNCE_MS', 10000),
+            'batch_count' => env('OWLOGS_SHIP_BATCH_COUNT', 256),
+        ],
+
         'octane' => [
             'window_ms' => env('OWLOGS_OCTANE_WINDOW_MS', 2000),
             'batch_count' => env('OWLOGS_OCTANE_BATCH_COUNT', 20),
         ],
+
         'flush_strategy' => env('OWLOGS_FLUSH_STRATEGY'),
     ],
 

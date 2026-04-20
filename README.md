@@ -10,7 +10,9 @@ Drop-in, zero-config, Octane-safe. Works with Laravel 11, 12 and 13.
 
 - PHP **8.2+**
 - Laravel **11**, **12** or **13**
-- A queue driver (redis, database, sqs, etc.) — **strongly recommended** so log shipping never blocks a request
+- A queue driver (redis, database, sqs, etc.) — **required**: the ship job runs on the queue, no HTTP call blocks a request
+- A persistent cache store (redis, file, database, memcached) — the debounce marker uses `Cache::add`; the `array` driver prevents de-duplication across requests
+- Redis **or** a writable filesystem — for the cross-process log buffer store (see *How it works*)
 - An **Owlogs account** (free sign-up at [owlogs.com](https://www.owlogs.com)) to get a workspace API key
 
 ---
@@ -27,7 +29,8 @@ Drop-in, zero-config, Octane-safe. Works with Laravel 11, 12 and 13.
 - **Performance spans** via the `Measure` helper and optional automatic DB query tracking with N+1 detection.
 - **Breadcrumbs** for action timelines.
 - **Opt-in lifecycle auto-logging** for auth events, job lifecycle, mail, cache, slow queries, scheduled tasks, model changes, and more.
-- **Async delivery** via a queue job with retries and exponential backoff — shipping never blocks the request.
+- **Async delivery** via a debounced queue job: N flushes (HTTP request + queue jobs it dispatches) in the same window collapse to a single `ShipBufferedLogsJob` — no cascade, no blocking.
+- **Runtime-aware buffering**: non-Octane accumulates in RAM and flushes once per request/job/command boundary; Octane batches across requests with a 2 s / 20-log window so workers ship fewer, bigger payloads.
 - **Octane-safe**: no container / request injection into singletons, all state is reset between requests.
 
 ---
@@ -95,21 +98,34 @@ Either is also fine to keep — a pre-existing channel definition is never overw
 ## How it works
 
 ```
-┌──────────────┐   ┌───────────────┐   ┌───────────────┐   ┌──────────────┐
-│  Log::info() │ → │  LogContext   │ → │ RemoteHandler │ → │ SendLogsJob  │
-│              │   │     Tap       │   │  (buffered)   │   │  (queued)    │
-└──────────────┘   └───────────────┘   └───────────────┘   └──────┬───────┘
-                                                                   │
-                                                                   ▼
-                                                          POST /api/owlogs/ingest
-                                                          X-Api-Key: owl_…
+┌──────────────┐   ┌───────────────┐   ┌─────────────────┐   ┌─────────────────┐   ┌───────────────────────┐
+│  Log::info() │ → │  LogContext   │ → │ RemoteHandler   │ → │ LogBufferStore  │ → │ ShipBufferedLogsJob   │
+│              │   │     Tap       │   │ (RAM, policy)   │   │ (Redis / file)  │   │ (queued, debounced)   │
+└──────────────┘   └───────────────┘   └─────────────────┘   └─────────────────┘   └──────────┬────────────┘
+                                              ▲                      ▲                        │
+                                              │                      │                        ▼
+                                          flush on                Cache::add          POST /api/owlogs/ingest
+                                          boundary                  debounce          X-Api-Key: owl_…
+                                       (or Octane                  (once per
+                                         window)                 10 s window)
 ```
 
-1. Global middleware `AddLogContext` populates Laravel's `Context` facade on every HTTP request with the tracing, routing, user and timing fields. The same context is propagated to queue jobs via `Context::hydrated`, and to artisan commands via `CommandStarting`.
-2. `LogContextTap` attaches a Monolog processor that resolves the **real** caller frame (skipping framework internals) and sets a JSON formatter.
-3. `RemoteHandler` buffers log records in memory (default 50) and flushes on batch-size, on soft payload-size cap, on `register_shutdown_function`, after each queue job completes (`Queue::after`), or on Octane lifecycle events (`RequestTerminated`, `TaskTerminated`, `WorkerStopping`). Soft-triggered flushes are debounced via `OWLOGS_MIN_FLUSH_INTERVAL_MS`; forced flushes bypass it.
-4. Flushing dispatches a `SendLogsJob` that `POST`s the batch as JSON (optionally gzipped) to `https://www.owlogs.com/api/owlogs/ingest` with `X-Api-Key: {OWLOGS_API_KEY}`. Batches larger than `OWLOGS_MAX_PAYLOAD_BYTES` are split into multiple jobs.
-5. The job retries 3 times with backoff `[5, 30, 120]` seconds on 5xx / network errors, and abandons without retry on 4xx (bad key, invalid payload), `403` (no active subscription) and `429` (quota exhausted).
+The pipeline has two independent stages — a per-process RAM buffer and a cross-process persistent buffer — both with their own bounded-size / bounded-time guarantees. Together they collapse what used to be *one queue job per flush* into *one ship job per debounce window*.
+
+1. **Context enrichment.** Global middleware `AddLogContext` populates Laravel's `Context` facade on every HTTP request with tracing, routing, user and timing fields. The same context flows into queue jobs (`Context::hydrated`) and artisan commands (`CommandStarting`).
+2. **Caller trace + formatter.** `LogContextTap` attaches a Monolog processor that resolves the real `file:line` / `Class@method` of the caller (skipping framework frames) and sets a JSON formatter.
+3. **RAM buffer, runtime-aware.** `RemoteHandler` accumulates records in memory. When to drain RAM → store is chosen by the active `FlushPolicy`:
+    - **`EndOfRequestPolicy`** (non-Octane: PHP-FPM / Herd, artisan one-shot, `queue:work`): no mid-request flush. Drain on `app()->terminating()`, `Queue::after`, `CommandFinished`, plus a `register_shutdown_function` safety net.
+    - **`OctaneWindowPolicy`** (Swoole / RoadRunner / FrankenPHP): drain when the RAM buffer reaches `octane.batch_count` (20) **or** `octane.window_ms` (2 000) have elapsed since the first buffered record. Under Swoole, `Octane::tick` enforces the window even during idle periods; RR / FrankenPHP check on each `RequestTerminated` + `WorkerStopping`.
+    - Runtime is detected from `$_SERVER['LARAVEL_OCTANE']`. `OWLOGS_FLUSH_STRATEGY=octane|end_of_request` forces one or the other (tests / edge cases).
+    - An unconditional hard ceiling at `2 × batch_size` / `2 × max_payload_bytes` forces a flush no matter the policy — protects against a runaway caller looping on `Log::*`.
+4. **Cross-process store.** On flush, rows are appended to a `LogBufferStore`:
+    - `redis` (default) — single Redis list, atomic Lua-scripted `LRANGE` + `LTRIM` drain. Multiple concurrent processes append safely; a drain always returns distinct rows. Requires `OWLOGS_BUFFER_REDIS_CONNECTION` (default `default`).
+    - `file` — JSONL under `OWLOGS_BUFFER_FILE_PATH` (default `storage/app/owlogs/buffer.jsonl`) with advisory `flock(LOCK_EX)`. Zero dependencies beyond a writable filesystem.
+    - `memory` — in-process, testing only.
+5. **Debounced dispatch.** After appending, `RemoteHandler::flush()` tries to dispatch **one** `ShipBufferedLogsJob` guarded by `Cache::add('owlogs:ship:pending', ttl)`. Any flush fired within the debounce window (`ship.debounce_ms`, default 10 000) sees the marker and appends without dispatching — so an HTTP request that fans out to 15 queue jobs still queues a single ship job.
+6. **Ship job.** `ShipBufferedLogsJob::handle()` releases the marker, drains up to `ship.batch_count` (256) rows from the store, splits the payload by `max_payload_bytes` (each split becomes one HTTPS POST, gzipped, to `https://www.owlogs.com/api/owlogs/ingest`), and self-re-dispatches (no delay) while `store.size() > 0`. `RemoteHandler::$suppressed` is held `true` for the duration so nothing the job does can feed back into the buffer.
+7. **Retries.** Each POST retries 3 times with backoff `[5, 30, 120]` seconds on 5xx / network errors. 4xx client errors (bad key, invalid payload), `403` (no active subscription) and `429` (quota exhausted) abandon without retry. The rows already drained from the store are serialized into the job payload, so a retry re-ships the same batch (at-least-once, never lost on transient 5xx).
 
 ---
 
@@ -220,19 +236,58 @@ Most lifecycle events are captured automatically out of the box. Flip any switch
 
 All of the following can be overridden in `config/owlogs.php` after publishing.
 
+### Core
+
 | Env var | Default | Description |
 |---|---|---|
 | `OWLOGS_ENABLED` | `true` | Master kill-switch |
 | `OWLOGS_API_KEY` | — | Workspace API key (sent as `X-Api-Key`) |
 | `OWLOGS_AUTO_REGISTER_STACK` | `true` | Auto-define the `owlogs` channel and append it to `stack` on boot |
-| `OWLOGS_BATCH_SIZE` | `50` | Buffered row count that triggers a flush |
-| `OWLOGS_MAX_PAYLOAD_BYTES` | `524288` | Soft cap on JSON payload size; triggers a flush and splits oversized batches |
-| `OWLOGS_MIN_FLUSH_INTERVAL_MS` | `500` | Minimum delay between soft-triggered flushes (shutdown / `Queue::after` / Octane events always force-flush) |
+| `OWLOGS_JSON` | `true` | Use JsonFormatter (vs. LineFormatter) |
+
+### Transport (HTTP POST to Owlogs)
+
+| Env var | Default | Description |
+|---|---|---|
+| `OWLOGS_INGEST_URL` | `https://www.owlogs.com/api/owlogs/ingest` | Ingest endpoint |
 | `OWLOGS_COMPRESSION` | `true` | Gzip the request body before POSTing |
-| `OWLOGS_QUEUE` | `default` | Queue name for `SendLogsJob` |
+| `OWLOGS_QUEUE` | `default` | Queue name for `ShipBufferedLogsJob` |
 | `OWLOGS_QUEUE_CONNECTION` | — | Queue connection (null = app default) |
 | `OWLOGS_TIMEOUT` | `30` | HTTP timeout in seconds |
-| `OWLOGS_JSON` | `true` | Use JsonFormatter (vs. LineFormatter) |
+| `OWLOGS_MAX_PAYLOAD_BYTES` | `524288` (512 KB) | Hard cap used by the ship job's chunker: any batch larger than this is split into multiple POSTs |
+
+### Ship debounce (queue → Owlogs)
+
+Multiple flushes within the debounce window collapse to a single `ShipBufferedLogsJob`. The job drains up to `batch_count` rows per run, self-re-dispatches while the store still has rows.
+
+| Env var | Default | Description |
+|---|---|---|
+| `OWLOGS_SHIP_DEBOUNCE_MS` | `10000` | Delay applied to each ship dispatch; also the effective de-duplication window |
+| `OWLOGS_SHIP_BATCH_COUNT` | `256` | Max rows drained (and shipped) per ship-job run |
+
+### Buffer store (cross-process queue of pending rows)
+
+| Env var | Default | Description |
+|---|---|---|
+| `OWLOGS_BUFFER_STORE` | `redis` | `redis`, `file`, or `memory` |
+| `OWLOGS_BUFFER_REDIS_CONNECTION` | `default` | Redis connection name (from `config/database.php`) |
+| `OWLOGS_BUFFER_REDIS_KEY` | `owlogs:buffer` | List key used in Redis |
+| `OWLOGS_BUFFER_FILE_PATH` | `storage/app/owlogs/buffer.jsonl` | JSONL file path when `buffer_store=file` |
+
+### RAM flush policy (per-process)
+
+| Env var | Default | Description |
+|---|---|---|
+| `OWLOGS_OCTANE_WINDOW_MS` | `2000` | Octane only: flush RAM when this many ms elapsed since the first buffered record |
+| `OWLOGS_OCTANE_BATCH_COUNT` | `20` | Octane only: flush RAM when this many records are buffered |
+| `OWLOGS_FLUSH_STRATEGY` | — | `octane`, `end_of_request`, or unset (auto-detect) |
+| `OWLOGS_BATCH_SIZE` | `50` | Hard ceiling: RAM buffer is force-drained when it hits `batch_size * 2` rows (runaway-loop protection) |
+| `OWLOGS_MIN_FLUSH_INTERVAL_MS` | `500` | **Deprecated.** No longer read; kept to avoid breaking older `.env` files |
+
+### Measurement
+
+| Env var | Default | Description |
+|---|---|---|
 | `OWLOGS_MEASURE_DB` | `false` | Auto-instrument DB queries |
 | `OWLOGS_MEASURE_MEMORY` | `true` | Attach peak memory to each batch |
 | `OWLOGS_N_PLUS_ONE_THRESHOLD` | `5` | Identical-SQL count to flag as N+1 |
@@ -321,7 +376,22 @@ Expected responses:
 
 **Jobs pile up in the `failed_jobs` table.** Check the exception: if it's `401` / `403`, your `OWLOGS_API_KEY` is wrong or the key was rotated — regenerate it from your workspace and update `.env`.
 
-**Logs never arrive.** Run `php artisan queue:work` — without a worker, dispatched `SendLogsJob` will never execute. Also verify `OWLOGS_API_KEY` is set (empty key = silent no-op), and that `LOG_CHANNEL=stack` (or `LOG_CHANNEL=owlogs`) — if `LOG_CHANNEL` points to a non-stack channel (e.g. `single`), the auto-registered `owlogs` entry in `stack` is bypassed.
+**Logs never arrive.** Run `php artisan queue:work` — without a worker, the dispatched `ShipBufferedLogsJob` will never execute and rows pile up in the store. Also verify `OWLOGS_API_KEY` is set (empty key = silent no-op), and that `LOG_CHANNEL=stack` (or `LOG_CHANNEL=owlogs`) — if `LOG_CHANNEL` points to a non-stack channel (e.g. `single`), the auto-registered `owlogs` entry in `stack` is bypassed.
+
+**Too many `ShipBufferedLogsJob` in the queue.** The debounce marker (`Cache::add`) needs a shared persistent cache. Check `CACHE_STORE` (Laravel 11+) / `CACHE_DRIVER` — if it's `array`, each PHP request has its own marker and no de-duplication happens. Switch to `redis`, `file`, `database`, or `memcached`.
+
+**Rows stuck in the buffer.** Inspect the store directly:
+
+```bash
+# Redis
+redis-cli LLEN owlogs:buffer
+redis-cli LRANGE owlogs:buffer 0 0
+
+# File
+wc -l storage/app/owlogs/buffer.jsonl
+```
+
+A non-zero `LLEN` with no ship job in the queue usually means the cache marker is stale (e.g. the previous ship job crashed before releasing it). Run `php artisan cache:forget owlogs:ship:pending` to clear it — the next flush will re-arm dispatch.
 
 **Octane complains about bindings.** The agent does not use container / request / config injection in singletons. If you see such warnings, they come from elsewhere in your app.
 

@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Log;
-use Skeylup\OwlogsAgent\Jobs\SendLogsJob;
+use Skeylup\OwlogsAgent\Jobs\ShipBufferedLogsJob;
 
 beforeEach(function (): void {
     Bus::fake();
@@ -18,7 +18,7 @@ it('buffers a typical request without dispatching mid-request', function (): voi
     Log::channel('owlogs')->info('step 2');
     Log::channel('owlogs')->info('step 3');
 
-    Bus::assertNotDispatched(SendLogsJob::class);
+    Bus::assertNotDispatched(ShipBufferedLogsJob::class);
 });
 
 it('flushes exactly once when the app terminates', function (): void {
@@ -28,11 +28,11 @@ it('flushes exactly once when the app terminates', function (): void {
 
     app()->terminate();
 
-    Bus::assertDispatchedTimes(SendLogsJob::class, 1);
+    Bus::assertDispatchedTimes(ShipBufferedLogsJob::class, 1);
 });
 
 it('does not dispatch on terminate when nothing was logged', function (): void {
     app()->terminate();
 
-    Bus::assertNotDispatched(SendLogsJob::class);
+    Bus::assertNotDispatched(ShipBufferedLogsJob::class);
 });

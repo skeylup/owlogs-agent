@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Skeylup\OwlogsAgent\Handlers;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Context;
 use Monolog\Handler\AbstractProcessingHandler;
 use Monolog\Level;
@@ -12,14 +13,23 @@ use Monolog\LogRecord;
 use Skeylup\OwlogsAgent\Contracts\HasLogContext;
 use Skeylup\OwlogsAgent\Flushing\EndOfRequestPolicy;
 use Skeylup\OwlogsAgent\Flushing\FlushPolicy;
-use Skeylup\OwlogsAgent\Jobs\SendLogsJob;
+use Skeylup\OwlogsAgent\Jobs\ShipBufferedLogsJob;
+use Skeylup\OwlogsAgent\Transport\InMemoryLogBufferStore;
+use Skeylup\OwlogsAgent\Transport\LogBufferStore;
 use Throwable;
 
 /**
- * Monolog handler that buffers log records and ships them to the Owlogs
- * server via SendLogsJob. "When to flush" is owned by an injected
- * FlushPolicy — this class only buffers, enforces a memory hard ceiling,
- * and chunks the final payload for HTTP.
+ * Monolog handler. Two responsibilities only: (1) buffer incoming log
+ * records in RAM respecting the injected FlushPolicy; (2) on flush,
+ * push the accumulated rows to the cross-process LogBufferStore and
+ * debounce-dispatch a ShipBufferedLogsJob that will actually POST them
+ * to Owlogs.
+ *
+ * We no longer dispatch one SendLogsJob per flush: N flushes within
+ * `transport.ship.debounce_ms` collapse to a single queued ship job
+ * via a Cache::add marker. The ship job drains up to
+ * `transport.ship.batch_count` rows from the store, sends them, then
+ * re-dispatches itself while `store->size() > 0`.
  */
 class RemoteHandler extends AbstractProcessingHandler
 {
@@ -39,6 +49,8 @@ class RemoteHandler extends AbstractProcessingHandler
     private bool $flushing = false;
 
     private FlushPolicy $policy;
+
+    private LogBufferStore $store;
 
     /**
      * When true, every incoming record is dropped on the floor instead of
@@ -81,17 +93,24 @@ class RemoteHandler extends AbstractProcessingHandler
         Level|int|string $level = Level::Debug,
         bool $bubble = true,
         ?FlushPolicy $policy = null,
+        ?LogBufferStore $store = null,
     ) {
         parent::__construct($level, $bubble);
 
         $this->batchSize = (int) config('owlogs.transport.batch_size', 50);
         $this->maxPayloadBytes = (int) config('owlogs.transport.max_payload_bytes', 512 * 1024);
         $this->policy = $policy ?? new EndOfRequestPolicy;
+        $this->store = $store ?? new InMemoryLogBufferStore;
     }
 
     public function setPolicy(FlushPolicy $policy): void
     {
         $this->policy = $policy;
+    }
+
+    public function setStore(LogBufferStore $store): void
+    {
+        $this->store = $store;
     }
 
     public function bufferCount(): int
@@ -146,11 +165,14 @@ class RemoteHandler extends AbstractProcessingHandler
     }
 
     /**
-     * Flush buffered rows by dispatching one or more SendLogsJob(s).
+     * Flush: drain the RAM buffer into the cross-process LogBufferStore
+     * and debounce-dispatch a ShipBufferedLogsJob. Attaches the current
+     * measures snapshot and memory peak to the last row of the batch.
      *
-     * Attaches the current measures snapshot and memory peak to the last
-     * row of the batch — this gives the most complete picture. When the
-     * batch would exceed max_payload_bytes it is split into chunks.
+     * The first flush in each debounce window dispatches the ship job
+     * (with delay = debounce_ms). Subsequent flushes during that window
+     * append to the store without dispatching — the single queued ship
+     * job drains everything at once.
      *
      * @param  bool  $force  reserved for future use; flush is always unconditional now
      */
@@ -183,14 +205,14 @@ class RemoteHandler extends AbstractProcessingHandler
                 $rows[$lastIdx]['memory_peak_mb'] = (int) round(memory_get_peak_usage(true) / 1024 / 1024);
             }
 
-            foreach ($this->chunkBySize($rows) as $chunk) {
-                try {
-                    SendLogsJob::dispatch($chunk);
-                } catch (Throwable) {
-                    // Silent failure: queue backend may be unavailable.
-                    // The local file channel (in parallel) still captures entries.
-                }
+            try {
+                $this->store->append($rows);
+            } catch (Throwable) {
+                // Silent failure: store may be momentarily unavailable.
+                return;
             }
+
+            $this->scheduleShip();
         } finally {
             $this->flushing = false;
         }
@@ -203,39 +225,46 @@ class RemoteHandler extends AbstractProcessingHandler
     }
 
     /**
-     * Split rows into chunks whose JSON size stays below max_payload_bytes.
+     * Dispatch a ShipBufferedLogsJob at most once per debounce window.
      *
-     * A single row that already exceeds the cap is sent in its own chunk
-     * (dropping would lose data; the server remains free to reject it).
-     *
-     * @param  list<array<string, mixed>>  $rows
-     * @return list<list<array<string, mixed>>>
+     * Uses `Cache::add` as an atomic "first in the window wins" guard.
+     * If the marker already exists, another flush has already queued a
+     * ship job that will drain whatever we just appended.
      */
-    private function chunkBySize(array $rows): array
+    private function scheduleShip(): void
     {
-        $chunks = [];
-        $current = [];
-        $currentBytes = 0;
+        $debounceMs = (int) config('owlogs.transport.ship.debounce_ms', 10000);
+        $debounceSec = max(1, (int) ceil($debounceMs / 1000));
+        // Keep the marker alive well past the delay so late arrivals
+        // within the same window still see it; the ship job itself
+        // releases it as soon as it starts handling.
+        $markerTtl = $debounceSec + 60;
 
-        foreach ($rows as $row) {
-            $encoded = json_encode($row, JSON_UNESCAPED_UNICODE);
-            $size = $encoded !== false ? strlen($encoded) : 0;
-
-            if ($current !== [] && $currentBytes + $size > $this->maxPayloadBytes) {
-                $chunks[] = $current;
-                $current = [];
-                $currentBytes = 0;
-            }
-
-            $current[] = $row;
-            $currentBytes += $size;
+        try {
+            $acquired = Cache::add(
+                ShipBufferedLogsJob::PENDING_CACHE_KEY,
+                1,
+                now()->addSeconds($markerTtl),
+            );
+        } catch (Throwable) {
+            // Cache backend unavailable — dispatch anyway. Worst case
+            // we queue a few redundant ship jobs; the store's atomic
+            // drain still prevents duplicate shipments.
+            $acquired = true;
         }
 
-        if ($current !== []) {
-            $chunks[] = $current;
+        if (! $acquired) {
+            return;
         }
 
-        return $chunks;
+        try {
+            ShipBufferedLogsJob::dispatch()->delay(now()->addSeconds($debounceSec));
+        } catch (Throwable) {
+            // Silent: queue backend may be unavailable.
+            // The records stay in the store and will be shipped by a
+            // later ship job (next flush re-arms the marker when the
+            // cache TTL expires).
+        }
     }
 
     /**

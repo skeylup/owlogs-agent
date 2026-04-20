@@ -3,9 +3,10 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Facades\Bus;
+use Illuminate\Support\Facades\Cache;
 use Skeylup\OwlogsAgent\Flushing\OctaneWindowPolicy;
 use Skeylup\OwlogsAgent\Handlers\RemoteHandler;
-use Skeylup\OwlogsAgent\Jobs\SendLogsJob;
+use Skeylup\OwlogsAgent\Jobs\ShipBufferedLogsJob;
 
 beforeEach(function (): void {
     Bus::fake();
@@ -30,7 +31,7 @@ it('does not flush below the batch count and inside the window', function (): vo
         $handler->handle(makeLogRecord("line {$i}"));
     }
 
-    Bus::assertNotDispatched(SendLogsJob::class);
+    Bus::assertNotDispatched(ShipBufferedLogsJob::class);
     expect($handler->bufferCount())->toBe(19);
 });
 
@@ -47,7 +48,7 @@ it('flushes when the batch count is reached', function (): void {
         $handler->handle(makeLogRecord("line {$i}"));
     }
 
-    Bus::assertDispatchedTimes(SendLogsJob::class, 1);
+    Bus::assertDispatchedTimes(ShipBufferedLogsJob::class, 1);
     expect($handler->bufferCount())->toBe(0);
 });
 
@@ -61,14 +62,14 @@ it('flushes when the window elapses on the next write', function (): void {
     $handler->handle(makeLogRecord('first'));
     $handler->handle(makeLogRecord('second'));
 
-    Bus::assertNotDispatched(SendLogsJob::class);
+    Bus::assertNotDispatched(ShipBufferedLogsJob::class);
 
     // Advance past the 2s window.
     $now += 2.001;
 
     $handler->handle(makeLogRecord('third'));
 
-    Bus::assertDispatchedTimes(SendLogsJob::class, 1);
+    Bus::assertDispatchedTimes(ShipBufferedLogsJob::class, 1);
 });
 
 it('flushes on tick when the window has elapsed', function (): void {
@@ -83,12 +84,12 @@ it('flushes on tick when the window has elapsed', function (): void {
     // Tick before window expires → no flush.
     $now += 1.0;
     $policy->onTick($handler);
-    Bus::assertNotDispatched(SendLogsJob::class);
+    Bus::assertNotDispatched(ShipBufferedLogsJob::class);
 
     // Tick after the window expires → flush.
     $now += 1.1;
     $policy->onTick($handler);
-    Bus::assertDispatchedTimes(SendLogsJob::class, 1);
+    Bus::assertDispatchedTimes(ShipBufferedLogsJob::class, 1);
 });
 
 it('resets the window after a flush so subsequent records start a fresh window', function (): void {
@@ -102,17 +103,21 @@ it('resets the window after a flush so subsequent records start a fresh window',
     for ($i = 0; $i < 20; $i++) {
         $handler->handle(makeLogRecord("a{$i}"));
     }
-    Bus::assertDispatchedTimes(SendLogsJob::class, 1);
+    Bus::assertDispatchedTimes(ShipBufferedLogsJob::class, 1);
+
+    // Simulate the ship job having started and released the debounce
+    // marker so a new flush can dispatch again.
+    Cache::forget(ShipBufferedLogsJob::PENDING_CACHE_KEY);
 
     // New record writes 1.5s after the previous flush → still well within a fresh window.
     $now += 1.5;
     $handler->handle(makeLogRecord('fresh'));
-    Bus::assertDispatchedTimes(SendLogsJob::class, 1);
+    Bus::assertDispatchedTimes(ShipBufferedLogsJob::class, 1);
 
     // Advance past 2s from THIS record and trigger the check.
     $now += 2.1;
     $policy->onTick($handler);
-    Bus::assertDispatchedTimes(SendLogsJob::class, 2);
+    Bus::assertDispatchedTimes(ShipBufferedLogsJob::class, 2);
 });
 
 it('onRequestBoundary respects the window and does not force flush', function (): void {
@@ -126,13 +131,13 @@ it('onRequestBoundary respects the window and does not force flush', function ()
 
     // Boundary fires before the window elapses → no flush (cross-request batching).
     $policy->onRequestBoundary($handler);
-    Bus::assertNotDispatched(SendLogsJob::class);
+    Bus::assertNotDispatched(ShipBufferedLogsJob::class);
     expect($handler->bufferCount())->toBe(1);
 
     // Boundary fires after the window elapses → flush.
     $now += 2.1;
     $policy->onRequestBoundary($handler);
-    Bus::assertDispatchedTimes(SendLogsJob::class, 1);
+    Bus::assertDispatchedTimes(ShipBufferedLogsJob::class, 1);
 });
 
 it('onWorkerStopping always force-flushes', function (): void {
@@ -143,5 +148,5 @@ it('onWorkerStopping always force-flushes', function (): void {
 
     $policy->onWorkerStopping($handler);
 
-    Bus::assertDispatchedTimes(SendLogsJob::class, 1);
+    Bus::assertDispatchedTimes(ShipBufferedLogsJob::class, 1);
 });

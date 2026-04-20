@@ -28,6 +28,10 @@ use Skeylup\OwlogsAgent\Flushing\RuntimeDetector;
 use Skeylup\OwlogsAgent\Handlers\RemoteHandler;
 use Skeylup\OwlogsAgent\Handlers\RemoteLogChannel;
 use Skeylup\OwlogsAgent\Middleware\AddLogContext;
+use Skeylup\OwlogsAgent\Transport\FileLogBufferStore;
+use Skeylup\OwlogsAgent\Transport\InMemoryLogBufferStore;
+use Skeylup\OwlogsAgent\Transport\LogBufferStore;
+use Skeylup\OwlogsAgent\Transport\RedisLogBufferStore;
 
 class OwlogsAgentServiceProvider extends ServiceProvider
 {
@@ -52,6 +56,26 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             return RuntimeDetector::isOctane()
                 ? new OctaneWindowPolicy
                 : new EndOfRequestPolicy;
+        });
+
+        $this->app->singleton(LogBufferStore::class, function (): LogBufferStore {
+            $driver = (string) config('owlogs.transport.buffer_store', 'redis');
+
+            if ($driver === 'file') {
+                $path = (string) (config('owlogs.transport.file_path')
+                    ?: storage_path('app/owlogs/buffer.jsonl'));
+
+                return new FileLogBufferStore($path);
+            }
+
+            if ($driver === 'memory') {
+                return new InMemoryLogBufferStore;
+            }
+
+            return new RedisLogBufferStore(
+                (string) config('owlogs.transport.redis_connection', 'default'),
+                (string) config('owlogs.transport.redis_key', 'owlogs:buffer'),
+            );
         });
     }
 

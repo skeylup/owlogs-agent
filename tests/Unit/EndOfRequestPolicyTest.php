@@ -5,7 +5,7 @@ declare(strict_types=1);
 use Illuminate\Support\Facades\Bus;
 use Skeylup\OwlogsAgent\Flushing\EndOfRequestPolicy;
 use Skeylup\OwlogsAgent\Handlers\RemoteHandler;
-use Skeylup\OwlogsAgent\Jobs\SendLogsJob;
+use Skeylup\OwlogsAgent\Jobs\ShipBufferedLogsJob;
 
 beforeEach(function (): void {
     Bus::fake();
@@ -21,7 +21,7 @@ it('buffers freely below the hard ceiling without dispatching', function (): voi
         $handler->handle(makeLogRecord("line {$i}"));
     }
 
-    Bus::assertNotDispatched(SendLogsJob::class);
+    Bus::assertNotDispatched(ShipBufferedLogsJob::class);
     expect($handler->bufferCount())->toBe(50);
 });
 
@@ -35,11 +35,11 @@ it('flushes exactly once on onRequestBoundary', function (): void {
         $handler->handle(makeLogRecord("line {$i}"));
     }
 
-    Bus::assertNotDispatched(SendLogsJob::class);
+    Bus::assertNotDispatched(ShipBufferedLogsJob::class);
 
     $policy->onRequestBoundary($handler);
 
-    Bus::assertDispatchedTimes(SendLogsJob::class, 1);
+    Bus::assertDispatchedTimes(ShipBufferedLogsJob::class, 1);
     expect($handler->bufferCount())->toBe(0);
 });
 
@@ -54,5 +54,5 @@ it('hard ceiling still fires under non-octane policy', function (): void {
         $handler->handle(makeLogRecord("line {$i}"));
     }
 
-    Bus::assertDispatchedTimes(SendLogsJob::class, 1);
+    Bus::assertDispatchedTimes(ShipBufferedLogsJob::class, 1);
 });
