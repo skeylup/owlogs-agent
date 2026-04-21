@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.9] - 2026-04-21
+
+### Changed
+- `RemoteHandler::buildRow()` no longer falls back to `auth()->id()` per log record. Resolving the guard + user provider on every record accumulated to dozens of redundant resolutions on busy requests. `user_id` is already populated once per request/job by `AddLogContext`, the `CommandStarting` listener, or the queue `Context::hydrated` listener — `buildRow` now reads it from context or emits `null`.
+
 ## [1.0.3] - 2026-04-19
 
 ### Fixed

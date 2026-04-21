@@ -310,7 +310,12 @@ class RemoteHandler extends AbstractProcessingHandler
             'user_agent' => $this->truncate($contextData['user_agent'] ?? null, 512),
             'request_input' => $contextData['request_input'] ?? null,
 
-            'user_id' => $contextData['user_id'] ?? auth()->id(),
+            // Resolved once per request/job by AddLogContext (HTTP), the queue
+            // hydrated listener, or the CommandStarting listener. Never call
+            // auth()->id() here — buildRow() runs once per log record, which
+            // on a busy request can be dozens of calls that each re-resolve
+            // the guard, user provider and (worst case) hit the DB.
+            'user_id' => $contextData['user_id'] ?? null,
 
             'app_name' => $contextData['app_name'] ?? null,
             'app_env' => $contextData['app_env'] ?? null,
