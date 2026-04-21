@@ -188,6 +188,12 @@ class OwlogsAgentServiceProvider extends ServiceProvider
         });
 
         Queue::before(function (JobProcessing $event): void {
+            // Defensive clear: Laravel hydrates Context from the job payload,
+            // but measures/breadcrumbs pushed during a previous job on the
+            // same worker can survive if the payload omits those keys.
+            Context::forget('measures');
+            Context::forget('breadcrumbs');
+
             $queueFields = config('owlogs.queue.fields', []);
 
             if ($queueFields['job_class'] ?? true) {
@@ -422,6 +428,10 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             $startTime = null;
 
             $this->onRequestBoundary();
+
+            foreach (['measures', 'breadcrumbs'] as $key) {
+                Context::forget($key);
+            }
         });
     }
 
@@ -494,7 +504,7 @@ class OwlogsAgentServiceProvider extends ServiceProvider
 
             $this->onRequestBoundary();
 
-            foreach (['trace_id', 'span_id', 'origin', 'scheduled_task', 'duration_ms'] as $key) {
+            foreach (['trace_id', 'span_id', 'origin', 'scheduled_task', 'duration_ms', 'measures', 'breadcrumbs'] as $key) {
                 Context::forget($key);
             }
         };

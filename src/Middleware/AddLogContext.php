@@ -35,6 +35,12 @@ class AddLogContext
         $fields = config('owlogs.fields', []);
         $startTime = hrtime(true);
 
+        // Defensive clear: Laravel flushes Context between Octane requests via
+        // ContextServiceProvider, but any path that bypasses that reset would
+        // leak measures/breadcrumbs from the previous request into this one.
+        Context::forget('measures');
+        Context::forget('breadcrumbs');
+
         // Tracing IDs
         if ($fields['trace_id'] ?? true) {
             Context::add('trace_id', (string) Str::ulid());

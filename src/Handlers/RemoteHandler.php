@@ -166,8 +166,9 @@ class RemoteHandler extends AbstractProcessingHandler
 
     /**
      * Flush: drain the RAM buffer into the cross-process LogBufferStore
-     * and debounce-dispatch a ShipBufferedLogsJob. Attaches the current
-     * measures snapshot and memory peak to the last row of the batch.
+     * and debounce-dispatch a ShipBufferedLogsJob. Attaches the process
+     * memory peak to the last row of the batch (measures are captured
+     * per-row at log time in buildRow(), not here).
      *
      * The first flush in each debounce window dispatches the ship job
      * (with delay = debounce_ms). Subsequent flushes during that window
@@ -195,13 +196,8 @@ class RemoteHandler extends AbstractProcessingHandler
             $this->bufferBytes = 0;
             $this->firstBufferedAt = null;
 
-            // Attach measures + memory to the last entry of the batch
-            $lastIdx = count($rows) - 1;
-            $measures = Context::get('measures');
-            if ($measures !== null) {
-                $rows[$lastIdx]['measures'] = json_encode($measures, JSON_UNESCAPED_UNICODE);
-            }
             if (config('owlogs.measure.memory', true)) {
+                $lastIdx = count($rows) - 1;
                 $rows[$lastIdx]['memory_peak_mb'] = (int) round(memory_get_peak_usage(true) / 1024 / 1024);
             }
 
@@ -332,7 +328,7 @@ class RemoteHandler extends AbstractProcessingHandler
             'context' => ! empty($userContext) ? json_encode($userContext, JSON_UNESCAPED_UNICODE) : null,
             'breadcrumbs' => isset($contextData['breadcrumbs']) ? json_encode($contextData['breadcrumbs'], JSON_UNESCAPED_UNICODE) : null,
             'job_props' => isset($contextData['job_props']) ? json_encode($contextData['job_props'], JSON_UNESCAPED_UNICODE) : null,
-            'measures' => null,
+            'measures' => isset($contextData['measures']) ? json_encode($contextData['measures'], JSON_UNESCAPED_UNICODE) : null,
             'memory_peak_mb' => null,
             'extra' => $this->buildExtra($extra, $contextData),
 
