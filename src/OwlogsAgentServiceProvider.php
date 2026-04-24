@@ -159,30 +159,30 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             $fields = config('owlogs.fields', []);
 
             if ($fields['span_id'] ?? true) {
-                $context->add('span_id', (string) Str::ulid());
+                $context->addHidden('span_id', (string) Str::ulid());
             }
 
             if ($fields['origin'] ?? true) {
-                $context->add('origin', 'queue');
+                $context->addHidden('origin', 'queue');
             }
 
             // Defensive fill: if the dispatcher didn't set these (e.g. job
             // dispatched from a bare CLI, tinker, or an external process),
             // populate them from config so log rows are never missing the
-            // app identity. addIf() never overwrites an existing value.
-            if (($fields['app_name'] ?? true) && ! $context->has('app_name')) {
-                $context->add('app_name', (string) config('app.name'));
+            // app identity. addHiddenIf() never overwrites an existing value.
+            if (($fields['app_name'] ?? true) && ! $context->hasHidden('app_name')) {
+                $context->addHidden('app_name', (string) config('app.name'));
             }
-            if (($fields['app_env'] ?? true) && ! $context->has('app_env')) {
-                $context->add('app_env', (string) config('app.env'));
+            if (($fields['app_env'] ?? true) && ! $context->hasHidden('app_env')) {
+                $context->addHidden('app_env', (string) config('app.env'));
             }
-            if (($fields['app_url'] ?? true) && ! $context->has('app_url')) {
-                $context->add('app_url', (string) config('app.url'));
+            if (($fields['app_url'] ?? true) && ! $context->hasHidden('app_url')) {
+                $context->addHidden('app_url', (string) config('app.url'));
             }
-            if (($fields['git_sha'] ?? true) && ! $context->has('git_sha')) {
+            if (($fields['git_sha'] ?? true) && ! $context->hasHidden('git_sha')) {
                 $sha = AddLogContext::resolveGitSha();
                 if ($sha !== null) {
-                    $context->add('git_sha', $sha);
+                    $context->addHidden('git_sha', $sha);
                 }
             }
         });
@@ -191,25 +191,25 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             // Defensive clear: Laravel hydrates Context from the job payload,
             // but measures/breadcrumbs pushed during a previous job on the
             // same worker can survive if the payload omits those keys.
-            Context::forget('measures');
-            Context::forget('breadcrumbs');
+            Context::forgetHidden('measures');
+            Context::forgetHidden('breadcrumbs');
 
             $queueFields = config('owlogs.queue.fields', []);
 
             if ($queueFields['job_class'] ?? true) {
-                Context::add('job_class', $event->job->resolveName());
+                Context::addHidden('job_class', $event->job->resolveName());
             }
 
             if ($queueFields['job_attempt'] ?? true) {
-                Context::add('job_attempt', $event->job->attempts());
+                Context::addHidden('job_attempt', $event->job->attempts());
             }
 
             if ($queueFields['queue_name'] ?? true) {
-                Context::add('queue_name', $event->job->getQueue());
+                Context::addHidden('queue_name', $event->job->getQueue());
             }
 
             if ($queueFields['connection_name'] ?? true) {
-                Context::add('connection_name', $event->connectionName);
+                Context::addHidden('connection_name', $event->connectionName);
             }
 
             $this->addJobProperties($event);
@@ -354,34 +354,34 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             $startTime = hrtime(true);
 
             if ($fields['trace_id'] ?? true) {
-                Context::addIf('trace_id', (string) Str::ulid());
+                Context::addHiddenIf('trace_id', (string) Str::ulid());
             }
 
             if ($fields['span_id'] ?? true) {
-                Context::addIf('span_id', Context::get('trace_id') ?? (string) Str::ulid());
+                Context::addHiddenIf('span_id', Context::getHidden('trace_id') ?? (string) Str::ulid());
             }
 
             if ($fields['origin'] ?? true) {
-                Context::add('origin', 'cli');
+                Context::addHidden('origin', 'cli');
             }
 
             // App identity — mirrors AddLogContext for CLI so log rows
             // dispatched from artisan (and any queue jobs chained from them)
             // carry app_name / app_env / app_url just like HTTP requests.
             if ($fields['app_name'] ?? true) {
-                Context::addIf('app_name', (string) config('app.name'));
+                Context::addHiddenIf('app_name', (string) config('app.name'));
             }
             if ($fields['app_env'] ?? true) {
-                Context::addIf('app_env', (string) config('app.env'));
+                Context::addHiddenIf('app_env', (string) config('app.env'));
             }
             if ($fields['app_url'] ?? true) {
-                Context::addIf('app_url', (string) config('app.url'));
+                Context::addHiddenIf('app_url', (string) config('app.url'));
             }
 
             if ($fields['git_sha'] ?? true) {
                 $sha = AddLogContext::resolveGitSha();
                 if ($sha !== null) {
-                    Context::addIf('git_sha', $sha);
+                    Context::addHiddenIf('git_sha', $sha);
                 }
             }
 
@@ -390,19 +390,19 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             if ($fields['user_id'] ?? true) {
                 try {
                     if (Auth::hasUser()) {
-                        Context::addIf('user_id', Auth::id());
+                        Context::addHiddenIf('user_id', Auth::id());
                     }
                 } catch (\Throwable) {
                     // Auth may not be bootable in every CLI context.
                 }
             }
 
-            Context::add('command_name', $event->command ?? 'unknown');
+            Context::addHidden('command_name', $event->command ?? 'unknown');
 
             if ($event->input) {
                 $args = (string) $event->input;
                 if ($args !== '') {
-                    Context::add('command_args', Str::limit($args, 500));
+                    Context::addHidden('command_args', Str::limit($args, 500));
                 }
             }
         });
@@ -416,9 +416,9 @@ class OwlogsAgentServiceProvider extends ServiceProvider
 
             if ($fields['duration_ms'] ?? true) {
                 $durationMs = (int) round((hrtime(true) - $startTime) / 1_000_000);
-                Context::add('duration_ms', $durationMs);
+                Context::addHidden('duration_ms', $durationMs);
 
-                Context::push('measures', [
+                Context::pushHidden('measures', [
                     'label' => 'command',
                     'duration_ms' => (float) $durationMs,
                     'meta' => ['command' => $event->command],
@@ -430,7 +430,7 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             $this->onRequestBoundary();
 
             foreach (['measures', 'breadcrumbs'] as $key) {
-                Context::forget($key);
+                Context::forgetHidden($key);
             }
         });
     }
@@ -455,35 +455,35 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             $startTime = hrtime(true);
 
             if ($fields['trace_id'] ?? true) {
-                Context::add('trace_id', (string) Str::ulid());
+                Context::addHidden('trace_id', (string) Str::ulid());
             }
 
             if ($fields['span_id'] ?? true) {
-                Context::add('span_id', Context::get('trace_id') ?? (string) Str::ulid());
+                Context::addHidden('span_id', Context::getHidden('trace_id') ?? (string) Str::ulid());
             }
 
             if ($fields['origin'] ?? true) {
-                Context::add('origin', 'schedule');
+                Context::addHidden('origin', 'schedule');
             }
 
             if ($fields['app_name'] ?? true) {
-                Context::addIf('app_name', (string) config('app.name'));
+                Context::addHiddenIf('app_name', (string) config('app.name'));
             }
             if ($fields['app_env'] ?? true) {
-                Context::addIf('app_env', (string) config('app.env'));
+                Context::addHiddenIf('app_env', (string) config('app.env'));
             }
             if ($fields['app_url'] ?? true) {
-                Context::addIf('app_url', (string) config('app.url'));
+                Context::addHiddenIf('app_url', (string) config('app.url'));
             }
 
             if ($fields['git_sha'] ?? true) {
                 $sha = AddLogContext::resolveGitSha();
                 if ($sha !== null) {
-                    Context::addIf('git_sha', $sha);
+                    Context::addHiddenIf('git_sha', $sha);
                 }
             }
 
-            Context::add('scheduled_task', $event->task->getSummaryForDisplay());
+            Context::addHidden('scheduled_task', $event->task->getSummaryForDisplay());
         });
 
         $cleanup = function ($event) use (&$startTime): void {
@@ -491,9 +491,9 @@ class OwlogsAgentServiceProvider extends ServiceProvider
 
             if (($fields['duration_ms'] ?? true) && $startTime !== null) {
                 $durationMs = (int) round((hrtime(true) - $startTime) / 1_000_000);
-                Context::add('duration_ms', $durationMs);
+                Context::addHidden('duration_ms', $durationMs);
 
-                Context::push('measures', [
+                Context::pushHidden('measures', [
                     'label' => 'scheduled_task',
                     'duration_ms' => (float) $durationMs,
                     'meta' => ['task' => $event->task->getSummaryForDisplay()],
@@ -505,7 +505,7 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             $this->onRequestBoundary();
 
             foreach (['trace_id', 'span_id', 'origin', 'scheduled_task', 'duration_ms', 'measures', 'breadcrumbs'] as $key) {
-                Context::forget($key);
+                Context::forgetHidden($key);
             }
         };
 
@@ -580,7 +580,7 @@ class OwlogsAgentServiceProvider extends ServiceProvider
         }
 
         if ($props !== []) {
-            Context::add('job_props', $props);
+            Context::addHidden('job_props', $props);
         }
     }
 }

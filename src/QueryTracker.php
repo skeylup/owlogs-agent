@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Skeylup\OwlogsAgent;
 
 use Illuminate\Support\Facades\Context;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 /**
@@ -64,7 +65,7 @@ class QueryTracker
         }
         $normalizedSql = $this->normalizeSql($query->sql);
 
-        Context::push('measures', [
+        Context::pushHidden('measures', [
             'label' => 'db',
             'duration_ms' => round($query->time, 2),
             'meta' => [
@@ -84,10 +85,10 @@ class QueryTracker
                 'count' => $this->queryCounts[$normalizedSql],
                 'caller' => $caller,
                 'connection' => $query->connectionName,
-                'trace_id' => Context::get('trace_id'),
+                'trace_id' => Context::getHidden('trace_id'),
             ];
 
-            Context::push('measures', [
+            Context::pushHidden('measures', [
                 'label' => 'n+1',
                 'duration_ms' => 0,
                 'meta' => $pattern,
@@ -98,7 +99,7 @@ class QueryTracker
             $callerShort = $caller ? basename(str_replace(':', '#', $caller)) : '?';
             $message = "[n+1.detected] {$table} — {$callerShort}";
 
-            logger()->warning($message, [
+            Log::channel('owlogs')->warning($message, [
                 'sql' => $pattern['sql'],
                 'count' => $pattern['count'],
                 'caller' => $pattern['caller'],

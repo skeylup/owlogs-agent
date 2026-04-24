@@ -270,7 +270,7 @@ class RemoteHandler extends AbstractProcessingHandler
      */
     private function buildRow(LogRecord $record): array
     {
-        $contextData = Context::all();
+        $contextData = Context::allHidden();
         $extra = $record->extra;
         $userContext = $record->context;
 

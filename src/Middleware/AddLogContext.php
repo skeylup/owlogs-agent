@@ -38,60 +38,60 @@ class AddLogContext
         // Defensive clear: Laravel flushes Context between Octane requests via
         // ContextServiceProvider, but any path that bypasses that reset would
         // leak measures/breadcrumbs from the previous request into this one.
-        Context::forget('measures');
-        Context::forget('breadcrumbs');
+        Context::forgetHidden('measures');
+        Context::forgetHidden('breadcrumbs');
 
         // Tracing IDs
         if ($fields['trace_id'] ?? true) {
-            Context::add('trace_id', (string) Str::ulid());
+            Context::addHidden('trace_id', (string) Str::ulid());
         }
 
         if ($fields['span_id'] ?? true) {
-            Context::add('span_id', Context::get('trace_id') ?? (string) Str::ulid());
+            Context::addHidden('span_id', Context::getHidden('trace_id') ?? (string) Str::ulid());
         }
 
         if ($fields['origin'] ?? true) {
-            Context::add('origin', 'http');
+            Context::addHidden('origin', 'http');
         }
 
         // App info
         if ($fields['app_name'] ?? true) {
-            Context::add('app_name', (string) config('app.name'));
+            Context::addHidden('app_name', (string) config('app.name'));
         }
 
         if ($fields['app_env'] ?? true) {
-            Context::add('app_env', (string) config('app.env'));
+            Context::addHidden('app_env', (string) config('app.env'));
         }
 
         if ($fields['app_url'] ?? true) {
-            Context::add('app_url', (string) config('app.url'));
+            Context::addHidden('app_url', (string) config('app.url'));
         }
 
         // Request info
         if ($fields['uri'] ?? true) {
-            Context::add('uri', $request->method().' '.$request->fullUrl());
+            Context::addHidden('uri', $request->method().' '.$request->fullUrl());
         }
 
         if ($fields['ip'] ?? true) {
-            Context::add('ip', $request->ip());
+            Context::addHidden('ip', $request->ip());
         }
 
         if ($fields['user_agent'] ?? true) {
-            Context::add('user_agent', Str::limit((string) $request->userAgent(), 200, ''));
+            Context::addHidden('user_agent', Str::limit((string) $request->userAgent(), 200, ''));
         }
 
         // Attempt early resolution — may be null if auth hasn't run yet.
         if ($fields['user_id'] ?? true) {
             $userId = $request->user()?->getKey();
             if ($userId !== null) {
-                Context::add('user_id', $userId);
+                Context::addHidden('user_id', $userId);
             }
         }
 
         if ($fields['git_sha'] ?? true) {
             $gitSha = self::resolveGitSha();
             if ($gitSha !== null) {
-                Context::add('git_sha', $gitSha);
+                Context::addHidden('git_sha', $gitSha);
             }
         }
 
@@ -99,14 +99,14 @@ class AddLogContext
         if ($fields['route_name'] ?? true) {
             $routeName = $request->route()?->getName();
             if ($routeName !== null) {
-                Context::add('route_name', $routeName);
+                Context::addHidden('route_name', $routeName);
             }
         }
 
         if ($fields['route_action'] ?? true) {
             $action = $request->route()?->getActionName();
             if ($action !== null && $action !== 'Closure') {
-                Context::add('route_action', $action);
+                Context::addHidden('route_action', $action);
             }
         }
 
@@ -121,17 +121,17 @@ class AddLogContext
         $response = $next($request);
 
         // Route info — re-resolve after $next()
-        if (($fields['route_name'] ?? true) && ! Context::has('route_name')) {
+        if (($fields['route_name'] ?? true) && ! Context::hasHidden('route_name')) {
             $routeName = $request->route()?->getName();
             if ($routeName !== null) {
-                Context::add('route_name', $routeName);
+                Context::addHidden('route_name', $routeName);
             }
         }
 
-        if (($fields['route_action'] ?? true) && ! Context::has('route_action')) {
+        if (($fields['route_action'] ?? true) && ! Context::hasHidden('route_action')) {
             $action = $request->route()?->getActionName();
             if ($action !== null && $action !== 'Closure') {
-                Context::add('route_action', $action);
+                Context::addHidden('route_action', $action);
             }
         }
 
@@ -141,21 +141,21 @@ class AddLogContext
         if ($fields['user_id'] ?? true) {
             $userId = $user?->getKey();
             if ($userId !== null) {
-                Context::add('user_id', $userId);
+                Context::addHidden('user_id', $userId);
             }
         }
 
         if ($user instanceof HasLogContext) {
-            Context::add('user_context', $user->toLogContext());
-            Context::add('user_label', $user->getLogContextLabel());
+            Context::addHidden('user_context', $user->toLogContext());
+            Context::addHidden('user_label', $user->getLogContextLabel());
         }
 
         // Duration
         if ($fields['duration_ms'] ?? true) {
             $durationMs = (int) round((hrtime(true) - $startTime) / 1_000_000);
-            Context::add('duration_ms', $durationMs);
+            Context::addHidden('duration_ms', $durationMs);
 
-            Context::push('measures', [
+            Context::pushHidden('measures', [
                 'label' => 'request',
                 'duration_ms' => (float) $durationMs,
                 'meta' => [],
@@ -164,7 +164,7 @@ class AddLogContext
 
         // Response header for traceability
         if ($fields['trace_id'] ?? true) {
-            $response->headers->set('X-Trace-Id', Context::get('trace_id'));
+            $response->headers->set('X-Trace-Id', Context::getHidden('trace_id'));
         }
 
         return $response;
@@ -237,7 +237,7 @@ class AddLogContext
             $json = mb_substr($json, 0, 4096);
         }
 
-        Context::add('request_input', $json);
+        Context::addHidden('request_input', $json);
     }
 
     /**

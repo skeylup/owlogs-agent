@@ -67,7 +67,7 @@ class Measure
             'meta' => array_merge($span['meta'], $extraMeta),
         ];
 
-        Context::push('measures', $entry);
+        Context::pushHidden('measures', $entry);
 
         return $durationMs;
     }
@@ -101,7 +101,7 @@ class Measure
      */
     public static function checkpoint(string $label, array $meta = []): void
     {
-        Context::push('measures', [
+        Context::pushHidden('measures', [
             'label' => $label,
             'duration_ms' => 0,
             'meta' => $meta,
@@ -115,7 +115,7 @@ class Measure
      */
     public static function all(): array
     {
-        return Context::get('measures') ?? [];
+        return Context::getHidden('measures') ?? [];
     }
 
     /**
@@ -132,6 +132,6 @@ class Measure
     public static function clear(): void
     {
         static::$pending = [];
-        Context::forget('measures');
+        Context::forgetHidden('measures');
     }
 }

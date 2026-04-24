@@ -32,10 +32,10 @@ beforeEach(function (): void {
 });
 
 it('captures measures at log time, not flush time, so earlier logs do not inherit later measures', function (): void {
-    Context::push('measures', ['label' => 'measureA', 'duration_ms' => 1.0, 'meta' => []]);
+    Context::pushHidden('measures', ['label' => 'measureA', 'duration_ms' => 1.0, 'meta' => []]);
     Log::channel('owlogs')->info('first log');
 
-    Context::push('measures', ['label' => 'measureB', 'duration_ms' => 2.0, 'meta' => []]);
+    Context::pushHidden('measures', ['label' => 'measureB', 'duration_ms' => 2.0, 'meta' => []]);
     Log::channel('owlogs')->info('second log');
 
     app()->terminate();
@@ -60,33 +60,33 @@ it('purges measures and breadcrumbs between scheduled tasks', function (): void 
 
     Event::dispatch(new ScheduledTaskStarting($task));
 
-    Context::push('measures', ['label' => 'db_query', 'duration_ms' => 12.3, 'meta' => []]);
-    Context::push('breadcrumbs', 'TaskAction::run');
+    Context::pushHidden('measures', ['label' => 'db_query', 'duration_ms' => 12.3, 'meta' => []]);
+    Context::pushHidden('breadcrumbs', 'TaskAction::run');
 
-    expect(Context::get('measures'))->not->toBeNull();
-    expect(Context::get('breadcrumbs'))->not->toBeNull();
+    expect(Context::getHidden('measures'))->not->toBeNull();
+    expect(Context::getHidden('breadcrumbs'))->not->toBeNull();
 
     Event::dispatch(new ScheduledTaskFinished($task, 0.1));
 
-    expect(Context::get('measures'))->toBeNull();
-    expect(Context::get('breadcrumbs'))->toBeNull();
+    expect(Context::getHidden('measures'))->toBeNull();
+    expect(Context::getHidden('breadcrumbs'))->toBeNull();
 });
 
 it('purges measures and breadcrumbs after CLI commands finish', function (): void {
     Event::dispatch(new CommandStarting('test:command', new ArrayInput([]), new NullOutput));
 
-    Context::push('measures', ['label' => 'heavy_op', 'duration_ms' => 99.0, 'meta' => []]);
-    Context::push('breadcrumbs', 'CommandAction::execute');
+    Context::pushHidden('measures', ['label' => 'heavy_op', 'duration_ms' => 99.0, 'meta' => []]);
+    Context::pushHidden('breadcrumbs', 'CommandAction::execute');
 
     Event::dispatch(new CommandFinished('test:command', new ArrayInput([]), new NullOutput, 0));
 
-    expect(Context::get('measures'))->toBeNull();
-    expect(Context::get('breadcrumbs'))->toBeNull();
+    expect(Context::getHidden('measures'))->toBeNull();
+    expect(Context::getHidden('breadcrumbs'))->toBeNull();
 });
 
 it('purges measures and breadcrumbs at the start of a queue job', function (): void {
-    Context::push('measures', ['label' => 'previous_job_leak', 'duration_ms' => 50.0, 'meta' => []]);
-    Context::push('breadcrumbs', 'PreviousJob::trace');
+    Context::pushHidden('measures', ['label' => 'previous_job_leak', 'duration_ms' => 50.0, 'meta' => []]);
+    Context::pushHidden('breadcrumbs', 'PreviousJob::trace');
 
     $job = Mockery::mock(Job::class);
     $job->shouldReceive('resolveName')->andReturn('App\\Jobs\\TestJob');
@@ -96,23 +96,23 @@ it('purges measures and breadcrumbs at the start of a queue job', function (): v
 
     Event::dispatch(new JobProcessing('redis', $job));
 
-    expect(Context::get('measures'))->toBeNull();
-    expect(Context::get('breadcrumbs'))->toBeNull();
+    expect(Context::getHidden('measures'))->toBeNull();
+    expect(Context::getHidden('breadcrumbs'))->toBeNull();
 });
 
 it('does not leak breadcrumbs across HTTP requests via AddLogContext', function (): void {
-    Context::push('breadcrumbs', 'leftover_from_previous_request');
-    Context::push('measures', ['label' => 'prev_request', 'duration_ms' => 10.0, 'meta' => []]);
+    Context::pushHidden('breadcrumbs', 'leftover_from_previous_request');
+    Context::pushHidden('measures', ['label' => 'prev_request', 'duration_ms' => 10.0, 'meta' => []]);
 
     $middleware = new AddLogContext;
     $request = Request::create('/test', 'GET');
 
     $middleware->handle($request, function ($req) {
-        expect(Context::get('breadcrumbs'))->toBeNull();
+        expect(Context::getHidden('breadcrumbs'))->toBeNull();
         // AddLogContext pushes a `request` measure at end of handle(), so
         // during the inner closure (before $next returns) measures should
         // be null — confirming the defensive clear ran.
-        expect(Context::get('measures'))->toBeNull();
+        expect(Context::getHidden('measures'))->toBeNull();
 
         return new Response('ok');
     });

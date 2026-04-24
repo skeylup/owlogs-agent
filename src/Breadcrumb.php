@@ -25,7 +25,7 @@ class Breadcrumb
     {
         $entry = $detail !== null ? "{$label}: {$detail}" : $label;
 
-        Context::push('breadcrumbs', $entry);
+        Context::pushHidden('breadcrumbs', $entry);
     }
 
     /**
@@ -35,7 +35,7 @@ class Breadcrumb
      */
     public static function all(): array
     {
-        return Context::get('breadcrumbs') ?? [];
+        return Context::getHidden('breadcrumbs') ?? [];
     }
 
     /**
@@ -43,6 +43,6 @@ class Breadcrumb
      */
     public static function clear(): void
     {
-        Context::forget('breadcrumbs');
+        Context::forgetHidden('breadcrumbs');
     }
 }

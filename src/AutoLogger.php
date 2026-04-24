@@ -72,7 +72,7 @@ class AutoLogger
                     return;
                 }
 
-                Log::info('job.dispatched: '.class_basename($jobClass), [
+                Log::channel('owlogs')->info('job.dispatched: '.class_basename($jobClass), [
                     'job' => $jobClass,
                     'queue' => $event->job->queue ?? 'default',
                     'connection' => $event->connectionName,
@@ -89,7 +89,7 @@ class AutoLogger
                     return;
                 }
 
-                Log::info('job.started: '.class_basename($jobClass), [
+                Log::channel('owlogs')->info('job.started: '.class_basename($jobClass), [
                     'job' => $jobClass,
                     'attempt' => $event->job->attempts(),
                     'queue' => $event->job->getQueue(),
@@ -106,7 +106,7 @@ class AutoLogger
                     return;
                 }
 
-                Log::info('job.completed: '.class_basename($jobClass), [
+                Log::channel('owlogs')->info('job.completed: '.class_basename($jobClass), [
                     'job' => $jobClass,
                     'attempt' => $event->job->attempts(),
                     'queue' => $event->job->getQueue(),
@@ -122,7 +122,7 @@ class AutoLogger
                     return;
                 }
 
-                Log::error('job.failed: '.class_basename($jobClass).' — '.$event->exception->getMessage(), [
+                Log::channel('owlogs')->error('job.failed: '.class_basename($jobClass).' — '.$event->exception->getMessage(), [
                     'job' => $jobClass,
                     'attempt' => $event->job->attempts(),
                     'queue' => $event->job->getQueue(),
@@ -138,7 +138,7 @@ class AutoLogger
                     return;
                 }
 
-                Log::error('job.exception: '.class_basename($jobClass).' — '.$event->exception->getMessage(), [
+                Log::channel('owlogs')->error('job.exception: '.class_basename($jobClass).' — '.$event->exception->getMessage(), [
                     'job' => $jobClass,
                     'attempt' => $event->job->attempts(),
                     'exception_class' => get_class($event->exception),
@@ -155,7 +155,7 @@ class AutoLogger
                     return;
                 }
 
-                Log::warning('job.retrying: '.class_basename($jobClass), [
+                Log::channel('owlogs')->warning('job.retrying: '.class_basename($jobClass), [
                     'job' => $jobClass,
                     'delay' => $event->delay,
                 ]);
@@ -169,7 +169,7 @@ class AutoLogger
     {
         if ($config['auth_login'] ?? false) {
             Event::listen(Login::class, function (Login $event): void {
-                Log::info('auth.login: '.($event->user->email ?? $event->user->getKey()), [
+                Log::channel('owlogs')->info('auth.login: '.($event->user->email ?? $event->user->getKey()), [
                     'user_id' => $event->user->getKey(),
                     'guard' => $event->guard,
                     'remember' => $event->remember,
@@ -182,7 +182,7 @@ class AutoLogger
         if ($config['auth_failed'] ?? false) {
             Event::listen(AuthFailed::class, function (AuthFailed $event): void {
                 $email = $event->credentials['email'] ?? $event->credentials['username'] ?? '?';
-                Log::warning('auth.failed: '.$email, [
+                Log::channel('owlogs')->warning('auth.failed: '.$email, [
                     'guard' => $event->guard,
                     'ip' => request()->ip(),
                     'user_agent' => Str::limit((string) request()->userAgent(), 100, ''),
@@ -192,7 +192,7 @@ class AutoLogger
 
         if ($config['auth_logout'] ?? false) {
             Event::listen(Logout::class, function (Logout $event): void {
-                Log::info('auth.logout: '.($event->user?->email ?? $event->user?->getKey()), [
+                Log::channel('owlogs')->info('auth.logout: '.($event->user?->email ?? $event->user?->getKey()), [
                     'user_id' => $event->user?->getKey(),
                     'guard' => $event->guard,
                 ]);
@@ -201,7 +201,7 @@ class AutoLogger
 
         if ($config['auth_password_reset'] ?? false) {
             Event::listen(PasswordReset::class, function (PasswordReset $event): void {
-                Log::info('auth.password_reset: '.($event->user->email ?? $event->user->getKey()), [
+                Log::channel('owlogs')->info('auth.password_reset: '.($event->user->email ?? $event->user->getKey()), [
                     'user_id' => $event->user->getKey(),
                 ]);
             });
@@ -209,7 +209,7 @@ class AutoLogger
 
         if ($config['auth_verified'] ?? false) {
             Event::listen(Verified::class, function (Verified $event): void {
-                Log::info('auth.email_verified: '.($event->user->email ?? $event->user->getKey()), [
+                Log::channel('owlogs')->info('auth.email_verified: '.($event->user->email ?? $event->user->getKey()), [
                     'user_id' => $event->user->getKey(),
                 ]);
             });
@@ -225,7 +225,7 @@ class AutoLogger
                 $message = $event->message;
                 $to = $this->extractAddresses($message->getTo());
 
-                Log::info('mail.sending: '.implode(', ', $to).' — '.$message->getSubject(), [
+                Log::channel('owlogs')->info('mail.sending: '.implode(', ', $to).' — '.$message->getSubject(), [
                     'to' => $to,
                     'from' => $this->extractAddresses($message->getFrom()),
                     'mailer' => $event->data['mailer'] ?? null,
@@ -236,7 +236,7 @@ class AutoLogger
                 $message = $event->sent->getOriginalMessage();
                 $to = $this->extractAddresses($message->getTo());
 
-                Log::info('mail.sent: '.implode(', ', $to).' — '.$message->getSubject(), [
+                Log::channel('owlogs')->info('mail.sent: '.implode(', ', $to).' — '.$message->getSubject(), [
                     'to' => $to,
                     'message_id' => $message->getHeaders()->get('Message-ID')?->getBodyAsString(),
                 ]);
@@ -250,7 +250,7 @@ class AutoLogger
     {
         if ($config['notification_sent'] ?? false) {
             Event::listen(NotificationSent::class, function (NotificationSent $event): void {
-                Log::info('notification.sent: '.class_basename($event->notification).' via '.$event->channel, [
+                Log::channel('owlogs')->info('notification.sent: '.class_basename($event->notification).' via '.$event->channel, [
                     'notification' => get_class($event->notification),
                     'notifiable_type' => get_class($event->notifiable),
                     'notifiable_id' => $event->notifiable->getKey(),
@@ -260,7 +260,7 @@ class AutoLogger
 
         if ($config['notification_failed'] ?? false) {
             Event::listen(NotificationFailed::class, function (NotificationFailed $event): void {
-                Log::error('notification.failed: '.class_basename($event->notification).' via '.$event->channel, [
+                Log::channel('owlogs')->error('notification.failed: '.class_basename($event->notification).' via '.$event->channel, [
                     'notification' => get_class($event->notification),
                     'notifiable_type' => get_class($event->notifiable),
                     'notifiable_id' => $event->notifiable->getKey(),
@@ -286,7 +286,7 @@ class AutoLogger
                     return;
                 }
 
-                Log::warning('db.slow_query: '.round($query->time).'ms — '.Str::limit($query->sql, 100), [
+                Log::channel('owlogs')->warning('db.slow_query: '.round($query->time).'ms — '.Str::limit($query->sql, 100), [
                     'sql' => Str::limit($query->sql, 500),
                     'duration_ms' => round($query->time, 2),
                     'connection' => $query->connectionName,
@@ -297,7 +297,7 @@ class AutoLogger
 
         if ($config['migration'] ?? false) {
             Event::listen(MigrationEnded::class, function (MigrationEnded $event): void {
-                Log::info('db.migration: '.class_basename($event->migration).' ('.$event->method.')', [
+                Log::channel('owlogs')->info('db.migration: '.class_basename($event->migration).' ('.$event->method.')', [
                     'migration' => get_class($event->migration),
                     'direction' => $event->method,
                 ]);
@@ -311,7 +311,7 @@ class AutoLogger
     {
         if ($config['cache_miss'] ?? false) {
             Event::listen(CacheMissed::class, function (CacheMissed $event): void {
-                Log::debug('cache.miss: '.$event->key, [
+                Log::channel('owlogs')->debug('cache.miss: '.$event->key, [
                     'key' => $event->key,
                     'store' => $event->storeName,
                 ]);
@@ -320,7 +320,7 @@ class AutoLogger
 
         if ($config['cache_hit'] ?? false) {
             Event::listen(CacheHit::class, function (CacheHit $event): void {
-                Log::debug('cache.hit: '.$event->key, [
+                Log::channel('owlogs')->debug('cache.hit: '.$event->key, [
                     'key' => $event->key,
                     'store' => $event->storeName,
                 ]);
@@ -343,7 +343,7 @@ class AutoLogger
                 return;
             }
 
-            Log::error('http.error: '.$response->status().' '.$event->request->method().' '.Str::limit($event->request->url(), 80), [
+            Log::channel('owlogs')->error('http.error: '.$response->status().' '.$event->request->method().' '.Str::limit($event->request->url(), 80), [
                 'url' => Str::limit($event->request->url(), 200),
                 'status' => $response->status(),
                 'duration_ms' => $response->transferStats?->getTransferTime()
@@ -354,7 +354,7 @@ class AutoLogger
         });
 
         Event::listen(ConnectionFailed::class, function (ConnectionFailed $event): void {
-            Log::error('http.connection_failed: '.$event->request->method().' '.Str::limit($event->request->url(), 80), [
+            Log::channel('owlogs')->error('http.connection_failed: '.$event->request->method().' '.Str::limit($event->request->url(), 80), [
                 'url' => Str::limit($event->request->url(), 200),
             ]);
         });
@@ -371,7 +371,7 @@ class AutoLogger
         Event::listen(ScheduledTaskFailed::class, function (ScheduledTaskFailed $event): void {
             $command = $event->task->command ?? $event->task->description ?? 'closure';
 
-            Log::error('schedule.failed: '.$command.' — '.$event->exception->getMessage(), [
+            Log::channel('owlogs')->error('schedule.failed: '.$command.' — '.$event->exception->getMessage(), [
                 'exception_class' => get_class($event->exception),
                 'exception_file' => $event->exception->getFile().':'.$event->exception->getLine(),
             ]);
@@ -396,7 +396,7 @@ class AutoLogger
                 return;
             }
 
-            Log::debug('model.created: '.class_basename($class).'#'.$model->getKey(), [
+            Log::channel('owlogs')->debug('model.created: '.class_basename($class).'#'.$model->getKey(), [
                 'model' => $class,
                 'id' => $model->getKey(),
                 'attributes' => $this->safeAttributes($model->getAttributes()),
@@ -414,7 +414,7 @@ class AutoLogger
             $dirty = $model->getDirty();
             $original = array_intersect_key($model->getOriginal(), $dirty);
 
-            Log::debug('model.updated: '.class_basename($class).'#'.$model->getKey().' ['.implode(', ', array_keys($dirty)).']', [
+            Log::channel('owlogs')->debug('model.updated: '.class_basename($class).'#'.$model->getKey().' ['.implode(', ', array_keys($dirty)).']', [
                 'model' => $class,
                 'id' => $model->getKey(),
                 'changed' => array_keys($dirty),
@@ -431,7 +431,7 @@ class AutoLogger
                 return;
             }
 
-            Log::info('model.deleted: '.class_basename($class).'#'.$model->getKey(), [
+            Log::channel('owlogs')->info('model.deleted: '.class_basename($class).'#'.$model->getKey(), [
                 'model' => $class,
                 'id' => $model->getKey(),
             ]);
@@ -484,7 +484,7 @@ class AutoLogger
                 $context = array_merge($context, $this->extractEventData($event));
             }
 
-            Log::info('event.dispatched: '.class_basename($eventName), $context);
+            Log::channel('owlogs')->info('event.dispatched: '.class_basename($eventName), $context);
         });
     }
 
@@ -550,7 +550,7 @@ class AutoLogger
     /**
      * Jobs whose lifecycle events must never be logged via this agent.
      *
-     * Logging a failure here would emit a Log::error() → another buffered
+     * Logging a failure here would emit a Log::channel('owlogs')->error() → another buffered
      * entry → another SendLogsJob dispatch → potentially another failure,
      * creating a feedback loop that drowns Horizon in retries.
      *
