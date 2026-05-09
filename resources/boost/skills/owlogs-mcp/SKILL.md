@@ -62,23 +62,48 @@ For correlation / impact:
 - `compare_deployments(base_sha, head_sha)` → NEW vs disappeared error
   messages between two deploys.
 
-## Trace deep-dive — always summarize, never paste raw
+## Trace deep-dive — pick the right tool for the user's intent
 
-Once you have a candidate `trace_id`:
+Two flavours of "I want to understand this trace":
 
-1. Start with `get_trace_summary(trace_id)` — entry count, peak memory,
-   first error, time bounds. Cheap.
-2. For a **narrative** ("tell me what happened in this trace") → call
-   `summarize_trace_narrative(trace_id)`. Returns 2 paragraphs prose, safe
-   to relay almost verbatim. ~10x cheaper than ingesting `get_trace`.
-3. For a **stacktrace explanation** (one specific exception) → call
-   `summarize_stacktrace(trace_id)` or `(entry_id)`. Returns structured
-   exception + root cause + top 3 frames.
-4. For a **one-liner cause** in a list (e.g. annotating each of the top 5
-   issues) → call `extract_root_cause(trace_id)` per item.
-5. ONLY fall back to `get_trace(trace_id)` when the human asks for the raw
-   payloads or you can't reason without them. It returns up to 200 entries
-   uncompressed and burns input tokens.
+### A. The user wants you to **FIX the code** that broke
+
+Use `get_trace_markdown(trace_id)`. Returns the FULL trace as markdown —
+metadata, request input, error message, every entry's stacktrace,
+breadcrumbs, performance measures, all secrets redacted. **Pure DB read,
+zero owlogs spent on the Owlogs side.** Your local LLM (the IDE) reads
+it natively and can walk the stacktrace into the local source tree via
+Read / Grep.
+
+This is the right call for: "fix this trace", "why is this failing",
+"reproduce locally", "what's wrong with the checkout flow", anything
+where the agent's next step is to read source code.
+
+### B. The user wants an **explanation in prose**
+
+Use `summarize_trace_narrative(trace_id)`. Returns a 2-paragraph
+narrative, ~10× cheaper input than a raw markdown dump. Costs owlogs
+(it runs a cheap sub-agent server-side) but the answer is short and
+self-contained — the user reads, they don't ask you to fix.
+
+For a **stacktrace explanation only** (one specific exception, no
+fix-the-code intent) → `summarize_stacktrace(trace_id|entry_id)`.
+
+For a **one-liner cause** in a list (annotating each of the top N
+issues) → `extract_root_cause(trace_id)` per item.
+
+### C. Cheap stats first
+
+Always call `get_trace_summary(trace_id)` BEFORE either A or B if you're
+not sure which trace is the right one. It returns entry count, peak
+memory, first error, time bounds in a tiny payload — useful to confirm
+you've identified the right incident.
+
+### Avoid
+
+- `get_trace(trace_id)` is the chat-only legacy that returns raw JSON
+  payloads — DO NOT call it from the IDE; `get_trace_markdown` produces
+  a more readable, smaller, secret-redacted output for the same data.
 
 ## Always include a deeplink to the trace
 
@@ -130,8 +155,7 @@ and gets you a richer issue for free.
 
 ## Working with the local code
 
-For "find errors related to this file" / "explain how this endpoint
-works":
+### "Find errors related to this file" / "explain how this endpoint works"
 
 1. Use the IDE's `Read` to load the local file the user is editing.
 2. Use `search_logs_advanced(mentions: '<class basename>')` to find logs
@@ -139,6 +163,28 @@ works":
    `caller_file + caller_method + stacktrace + message`).
 3. Cross-reference: the `trace_id`s you find can be expanded with
    `get_trace_summary` → `summarize_trace_narrative`.
+
+### "Fix this error" / "reproduce this trace locally" — the killer recipe
+
+1. `get_trace_summary(trace_id)` — confirm it's the right incident.
+2. `get_trace_markdown(trace_id)` — pull the full export (ZERO owlogs
+   spent). This gives you the exception class + message, the failing
+   request input (URL, method, payload, user_id), the full stacktrace
+   with file paths, the breadcrumbs leading to the failure, and any
+   inline performance measures.
+3. Use the IDE's `Read` on the top user-code frames from the stacktrace
+   (skip vendor frames). The file paths in the export match the user's
+   local clone unless they're on a different branch.
+4. `Grep` for related code paths if the error message mentions a
+   specific value or constant.
+5. Propose the fix as a diff in the editor. Mention the deeplink from
+   `build_trace_url(trace_id)` so the user can verify against the live
+   trace.
+
+This is faster AND cheaper than the chat-style flow:
+- Cheaper: zero owlogs (no LLM on the Owlogs side).
+- Faster: one tool call gives you everything; no need to chain
+  summarize_* calls and then ask the user "ok now show me the file".
 
 ## Discovering other workspaces
 
@@ -155,10 +201,13 @@ You **cannot** switch workspace within a session — don't try.
 
 ## Things to avoid
 
-- Calling `get_trace` before `get_trace_summary` (wastes 5-30 KB of input
-  tokens for a stat you could have read in a 200-byte response).
-- Pasting a raw stacktrace into your reply. Always go through
-  `summarize_stacktrace` and reference the deeplink.
+- Calling `get_trace` (legacy JSON dump). Use `get_trace_markdown` —
+  same data, smaller, secret-redacted, parsable.
+- Calling `summarize_trace_narrative` when the user wants you to FIX
+  the code. The narrative costs owlogs AND drops the precise file/line
+  info you need — `get_trace_markdown` is free AND gives you more.
+- Calling any tool before `get_trace_summary` when you're not sure
+  which trace is the right one (~200-byte response, nearly free).
 - Hand-writing the trace URL. Always use `build_trace_url`.
 - Calling `github_search_code` / `github_get_file` when the project is
   open in the IDE.
@@ -166,6 +215,20 @@ You **cannot** switch workspace within a session — don't try.
   you'd have to hand-write the trace context and burn tokens.
 
 ## Token cost transparency
+
+Most tools cost ZERO owlogs (`whoami`, `list_workspaces`, `traffic_overview`,
+`search_logs_*`, `count_logs`, `list_traces`, `list_recent_errors`,
+`list_slow_traces`, `list_failing_jobs`, `list_issues`, `get_issue`,
+`analyze_route_performance`, `analyze_measures`, `who_was_affected`,
+`compare_deployments`, `get_trace_summary`, `get_trace_markdown`,
+`get_log_entry`, `build_trace_url`, every `github_*`). They're pure
+DB / GitHub HTTP reads.
+
+The owlogs-spending tools are exactly three: `summarize_stacktrace`,
+`summarize_trace_narrative`, `extract_root_cause`. They run a small LLM
+sub-agent server-side. Use them when you need *prose* output, not when
+you need raw data to reason about — for the latter,
+`get_trace_markdown` is the right call and it's free.
 
 Every response carries a `X-Owlogs-Spent` and `X-Owlogs-Remaining` header.
 The user is billed in **owlogs** (≈ \$0.70 per million owlogs), debited
