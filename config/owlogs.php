@@ -138,6 +138,7 @@ return [
         'app_env' => true,
         'app_url' => true,
         'uri' => true,
+        'http_method' => true,
         'route_name' => true,
         'route_action' => true,
         'ip' => true,
@@ -227,12 +228,18 @@ return [
     | URI Resolver
     |--------------------------------------------------------------------------
     |
-    | Optional callback to enrich the URI context for specific request types
-    | (e.g. Livewire components, SPA routes).
+    | Callback that can rewrite the URI captured for specific request types
+    | (Livewire updates, SPA routes, …) so the Owlogs UI can group by feature
+    | rather than by opaque endpoint.
+    |
+    | Default: the bundled Livewire resolver — turns
+    | `POST /livewire-{hash}/update` into `POST /livewire — Component::method`.
+    |
+    | Disable by setting `OWLOGS_URI_RESOLVER=` (empty) in your .env.
     |
     */
 
-    'uri_resolver' => null,
+    'uri_resolver' => env('OWLOGS_URI_RESOLVER', \Skeylup\OwlogsAgent\Support\LivewireUriResolver::class) ?: null,
 
     /*
     |--------------------------------------------------------------------------

@@ -72,6 +72,12 @@ class AddLogContext
             Context::addHidden('uri', $request->method().' '.$request->fullUrl());
         }
 
+        // Dedicated method column — lets the server filter by HTTP verb without
+        // splitting `uri` (which gets rewritten by url_resolver for Livewire).
+        if ($fields['http_method'] ?? true) {
+            Context::addHidden('http_method', $request->method());
+        }
+
         if ($fields['ip'] ?? true) {
             Context::addHidden('ip', $request->ip());
         }

@@ -300,6 +300,7 @@ class RemoteHandler extends AbstractProcessingHandler
             'caller_method' => $extra['caller_method'] ?? null,
 
             'uri' => $this->truncate($contextData['uri'] ?? null, 2048),
+            'http_method' => $this->truncate($contextData['http_method'] ?? null, 8),
             'route_name' => $contextData['route_name'] ?? null,
             'route_action' => $this->truncate($contextData['route_action'] ?? null, 512),
             'ip' => $contextData['ip'] ?? null,
@@ -361,7 +362,7 @@ class RemoteHandler extends AbstractProcessingHandler
             $extra['caller_file'], $extra['caller_line'], $extra['caller_method'],
             $extra['trace_id'], $extra['span_id'], $extra['origin'],
             $extra['app_name'], $extra['app_env'], $extra['app_url'],
-            $extra['uri'], $extra['route_name'], $extra['route_action'],
+            $extra['uri'], $extra['http_method'], $extra['route_name'], $extra['route_action'],
             $extra['ip'], $extra['user_agent'],
             $extra['user_id'], $extra['tenant_id'], $extra['user_context'], $extra['user_label'],
             $extra['git_sha'], $extra['duration_ms'],
