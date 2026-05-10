@@ -1,6 +1,6 @@
 ---
 name: owlogs-mcp
-description: 'ACTIVATE when the user has configured an Owlogs MCP server in their IDE (Claude Code / Cursor / Windsurf / Cline / Codex CLI) and is asking the agent to investigate logs, traces, errors, slow routes, or jobs from their workspace. Triggers on mentions of "owlogs", "the workspace logs", "trace_id", "what broke", "errors today", and on any tool call to `whoami`, `traffic_overview`, `list_recent_errors`, `search_logs_*`, `get_trace*`, `analyze_route_performance`, `summarize_*`, `extract_root_cause`, `build_trace_url`, or any `github_*` MCP tool. Guides the agent to (a) start every session with `whoami`, (b) cascade from cheap aggregations to expensive deep-dives, (c) prefer local Read/Grep over `github_*` code tools, and (d) use the `summarize_*` tools to keep input tokens low. Do NOT activate for in-app chat questions, generic Laravel logging help, or non-Owlogs log shippers.'
+description: 'ACTIVATE when the user has configured an Owlogs MCP server in their IDE (Claude Code / Cursor / Windsurf / Cline / Codex CLI) and is asking the agent to investigate logs, traces, errors, slow routes, slow queries, N+1, or jobs from their workspace. Triggers on mentions of "owlogs", "the workspace logs", "trace_id", "what broke", "errors today", "slow queries", "n+1", "n plus one", "missing eager load", and on any tool call to `whoami`, `traffic_overview`, `list_recent_errors`, `list_slow_queries`, `list_n_plus_one`, `search_logs_*`, `get_trace*`, `analyze_route_performance`, `summarize_*`, `extract_root_cause`, `build_trace_url`, or any `github_*` MCP tool. Guides the agent to (a) start every session with `whoami`, (b) cascade from cheap aggregations to expensive deep-dives, (c) prefer local Read/Grep over `github_*` code tools, and (d) use the `summarize_*` tools to keep input tokens low. Do NOT activate for in-app chat questions, generic Laravel logging help, or non-Owlogs log shippers.'
 license: MIT
 metadata:
   author: skeylup
@@ -38,6 +38,18 @@ cheaper one came back empty or ambiguous.
    totals, errors, top routes/jobs, deploys, open issues).
 2. **"Top errors / what's broken right now?"** → `list_issues` (pre-deduped
    exceptions / N+1s / slow queries) or `list_recent_errors`.
+2bis. **"What slow queries should I fix?"** → `list_slow_queries` (NOT
+   `list_issues` — the dedicated tool surfaces SQL, latest duration,
+   caller, connection at the top level + sort by `duration` to rank by
+   slowest known instance). Default sort = `occurrences` to find the
+   most-fired offender; switch to `sort: "duration"` for the slowest
+   single instance, or pass `min_duration_ms: 500` to focus on the
+   really nasty ones.
+2ter. **"Where are my N+1 queries?"** → `list_n_plus_one` (same idea —
+   surfaces SQL pattern, caller, and the `latest_duplicate_count`
+   = how many copies of the same query fired in ONE request). Sort by
+   `duplicate_count` to rank by per-request severity, or by
+   `occurrences` to find the most-fired N+1 across the workspace.
 3. **Targeted exact match** (a route, a user_id, a job class, a `trace_id`)
    → `search_logs_by_field`.
 4. **Composable filters across columns** (level + route + time + free-text
@@ -236,10 +248,10 @@ You **cannot** switch workspace within a session — don't try.
 Most tools cost ZERO owlogs (`whoami`, `list_workspaces`, `traffic_overview`,
 `search_logs_*`, `count_logs`, `list_traces`, `list_recent_errors`,
 `list_slow_traces`, `list_failing_jobs`, `list_issues`, `get_issue`,
-`analyze_route_performance`, `analyze_measures`, `who_was_affected`,
-`compare_deployments`, `get_trace_summary`, `get_trace_markdown`,
-`get_log_entry`, `build_trace_url`, every `github_*`). They're pure
-DB / GitHub HTTP reads.
+`list_slow_queries`, `list_n_plus_one`, `analyze_route_performance`,
+`analyze_measures`, `who_was_affected`, `compare_deployments`,
+`get_trace_summary`, `get_trace_markdown`, `get_log_entry`,
+`build_trace_url`, every `github_*`). They're pure DB / GitHub HTTP reads.
 
 The owlogs-spending tools are exactly three: `summarize_stacktrace`,
 `summarize_trace_narrative`, `extract_root_cause`. They run a small LLM
