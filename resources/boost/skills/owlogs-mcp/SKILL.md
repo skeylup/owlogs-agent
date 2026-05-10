@@ -45,10 +45,27 @@ cheaper one came back empty or ambiguous.
    → `search_logs_advanced` with `mentions: '<basename>'`.
 5. **Value lives in JSON** (Stripe `request_input.data.object.id`,
    `context.order_id`, `extra.user.email`) → `search_logs_by_json`.
-6. **Phrasal text** → `search_logs_text` (Postgres tsvector, message body
-   only).
-7. **Fuzzy / NL** ("checkout felt slow") → `search_logs_semantic` — last
-   resort, most expensive.
+6. **Open-ended question / fuzzy / NL** ("checkout felt slow",
+   "intermittent SSL error", "anything weird about this queue lately?")
+   → **`search_logs_hybrid`** is the right default. It runs lexical +
+   semantic in parallel, fuses both rankings via Reciprocal Rank Fusion,
+   and reranks with a cross-encoder (Cohere). Catches BOTH exact
+   identifiers (a stripe id buried in the message) AND meaning. Returns
+   `score` + `source` (lexical / semantic / both / reranked) for each hit.
+
+### When NOT to use hybrid
+
+- **Single-token / phrase** that you KNOW is in the message ("X-Owlogs-Spent",
+  a class name) → `search_logs_text` is enough and cheaper.
+- **Pure semantic** with no keyword overlap ("conceptually similar errors")
+  → `search_logs_semantic` skips the rerank cost and works fine.
+- **Cost-conscious follow-up** (you already have 5 candidate trace_ids and
+  just want to filter them by level / route) → `search_logs_advanced` with
+  the structured filters, no embedding call needed.
+
+Hybrid is more precise but pays for an embedding call AND a reranker call —
+~20 owlogs per call vs ~15 for pure semantic. Worth it when you'd otherwise
+be playing whack-a-mole with semantic false positives.
 
 For perf:
 
