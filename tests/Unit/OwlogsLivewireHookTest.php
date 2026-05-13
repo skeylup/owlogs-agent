@@ -34,6 +34,7 @@ it('seeds a default label on hydrate from the memo name', function (): void {
 
     expect(Context::getHidden('livewire_label'))->toBe('pages.users.index');
     expect(Context::getHidden('route_action'))->toBe('pages.users.index');
+    expect(Context::getHidden('uri'))->toContain('/livewire — pages.users.index');
 });
 
 it('falls back to component->getName() when memo lacks a name', function (): void {
@@ -60,6 +61,7 @@ it('records the called method and overrides the label on call', function (): voi
 
     expect(Context::getHidden('livewire_label'))->toBe('pages.users.index::delete');
     expect(Context::getHidden('route_action'))->toBe('pages.users.index::delete');
+    expect(Context::getHidden('uri'))->toContain('/livewire — pages.users.index::delete');
 
     $calls = Context::getHidden('livewire_calls');
     expect($calls)->toBeArray()->toHaveCount(1);

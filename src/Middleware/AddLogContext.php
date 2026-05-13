@@ -141,14 +141,6 @@ class AddLogContext
             }
         }
 
-        // Livewire ComponentHook posts a `livewire_label` during $next().
-        // Rewriting the URI here (rather than during the hook) keeps URI
-        // shaping centralised in this middleware and the request method
-        // available without touching the request facade from a hook.
-        if (($fields['uri'] ?? true) && Context::hasHidden('livewire_label')) {
-            Context::addHidden('uri', $request->method().' /livewire — '.Context::getHidden('livewire_label'));
-        }
-
         // User & tenant — resolved after $next() so auth middleware has run
         $user = $request->user();
 

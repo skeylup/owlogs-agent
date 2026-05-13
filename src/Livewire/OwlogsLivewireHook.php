@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Skeylup\OwlogsAgent\Livewire;
 
 use Illuminate\Support\Facades\Context;
+use Illuminate\Support\Facades\Request;
 use Livewire\ComponentHook;
 
 /**
@@ -46,8 +47,7 @@ class OwlogsLivewireHook extends ComponentHook
         }
 
         $name = $this->resolveName($memo);
-        Context::addHidden('livewire_label', $name);
-        Context::addHidden('route_action', $name);
+        $this->applyLabel($name);
     }
 
     /**
@@ -62,9 +62,7 @@ class OwlogsLivewireHook extends ComponentHook
     {
         $name = $this->resolveName();
         $label = $name.'::'.$method;
-
-        Context::addHidden('livewire_label', $label);
-        Context::addHidden('route_action', $label);
+        $this->applyLabel($label);
 
         $existing = Context::getHidden('livewire_calls');
         if (is_array($existing) && count($existing) >= self::MAX_CALLS_STORED) {
@@ -76,6 +74,21 @@ class OwlogsLivewireHook extends ComponentHook
             'method' => (string) $method,
             'params' => $this->sanitizeParams(is_array($params) ? $params : []),
         ]);
+    }
+
+    /**
+     * Write the label + rewrite the URI right away so any log emitted later
+     * in the same request — model events, DB warnings, etc — captures the
+     * feature-level URI rather than the opaque `/livewire-{hash}/update` one
+     * the middleware seeded before Livewire took over.
+     */
+    private function applyLabel(string $label): void
+    {
+        Context::addHidden('livewire_label', $label);
+        Context::addHidden('route_action', $label);
+
+        $method = Request::method();
+        Context::addHidden('uri', $method.' /livewire — '.$label);
     }
 
     /**

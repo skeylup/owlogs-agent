@@ -41,6 +41,9 @@ it('the registered ComponentHook fires through the real Livewire dispatch', func
 
     expect(Context::getHidden('livewire_label'))->toBe('owlogs-hook-test::increment');
     expect(Context::getHidden('route_action'))->toBe('owlogs-hook-test::increment');
+    // URI must be rewritten by the hook itself — not deferred — so logs
+    // emitted from within the component action capture the feature-level URI.
+    expect(Context::getHidden('uri'))->toContain('/livewire — owlogs-hook-test::increment');
 
     $calls = Context::getHidden('livewire_calls');
     expect($calls)->toBeArray()->toHaveCount(1);
