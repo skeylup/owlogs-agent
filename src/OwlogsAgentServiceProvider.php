@@ -25,7 +25,7 @@ use Laravel\Octane\Events\RequestTerminated;
 use Laravel\Octane\Events\TaskTerminated;
 use Laravel\Octane\Events\WorkerStarting;
 use Laravel\Octane\Events\WorkerStopping;
-use Livewire\Livewire;
+use Livewire\ComponentHookRegistry;
 use Skeylup\OwlogsAgent\Flushing\EndOfRequestPolicy;
 use Skeylup\OwlogsAgent\Flushing\FlushPolicy;
 use Skeylup\OwlogsAgent\Flushing\OctaneWindowPolicy;
@@ -47,6 +47,13 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             __DIR__.'/../config/owlogs.php',
             'owlogs'
         );
+
+        // Registered in register() — not boot() — because Livewire's own
+        // service provider calls ComponentHookRegistry::boot() during its
+        // boot(), which snapshots the registered hooks at that moment and
+        // wires mount/hydrate listeners only for those known then. A hook
+        // added later silently never fires.
+        $this->registerLivewireHook();
 
         $this->app->singleton(FlushPolicy::class, function (): FlushPolicy {
             $override = config('owlogs.transport.flush_strategy');
@@ -102,7 +109,6 @@ class OwlogsAgentServiceProvider extends ServiceProvider
         $this->registerScheduleContext();
         $this->registerAutoInstrumentation();
         $this->registerAutoLogger();
-        $this->registerLivewireHook();
         $this->registerFlushHooks();
 
         if ($this->app->runningInConsole()) {
@@ -548,19 +554,25 @@ class OwlogsAgentServiceProvider extends ServiceProvider
      * `POST /livewire — Component::method` instead of the opaque hashed URL.
      *
      * No-op when Livewire isn't installed — keeps the agent compatible with
-     * classic Laravel / Inertia / API-only projects.
+     * classic Laravel / Inertia / API-only projects. Calls ComponentHookRegistry
+     * directly (not the facade) so we don't depend on LivewireServiceProvider's
+     * `register()` having already run.
      */
     private function registerLivewireHook(): void
     {
+        if (! config('owlogs.enabled', true)) {
+            return;
+        }
+
         if (! config('owlogs.livewire.enabled', true)) {
             return;
         }
 
-        if (! class_exists(Livewire::class)) {
+        if (! class_exists(ComponentHookRegistry::class)) {
             return;
         }
 
-        Livewire::componentHook(OwlogsLivewireHook::class);
+        ComponentHookRegistry::register(OwlogsLivewireHook::class);
     }
 
     /**

@@ -27,6 +27,7 @@
     </source>
     <php>
         <env name="APP_ENV" value="testing"/>
+        <env name="APP_KEY" value="base64:Pq8FGbpRcA2VPYJq1cWvA1y9Gz2u9oEEd4PfvbEZj/M="/>
         <env name="OWLOGS_ENABLED" value="true"/>
     </php>
 </phpunit>
