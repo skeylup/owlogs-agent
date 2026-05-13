@@ -52,7 +52,8 @@
     },
     "autoload-dev": {
         "psr-4": {
-            "Skeylup\\OwlogsAgent\\Tests\\": "tests/"
+            "Skeylup\\OwlogsAgent\\Tests\\": "tests/",
+            "OwlogsAgentTestFixtures\\": "tests/Fixtures/"
         }
     },
     "scripts": {

@@ -314,6 +314,29 @@ Add your own after publishing the config:
 |---|---|---|
 | `OWLOGS_IGNORE_BROADCASTING` | `true` | Append `broadcasting/auth` to `ignored_uris` |
 
+### Ignoring noisy events
+
+The `event_dispatch` auto-log forwards every app-level event to Owlogs as an `event.dispatched: <ShortName>` entry. Third-party packages that fire an event on every request (e.g. `Spatie\LaravelSettings\Events\SettingsLoaded`) can drown out the signal.
+
+`config('owlogs.ignored_events')` is a list of event class names whose dispatched log is dropped before hitting the transport. It uses the same `Str::is` matcher as `ignored_uris`, so wildcards (`*`) are supported and a single entry can silence a whole package namespace at once.
+
+```php
+'ignored_events' => [
+    // Exact FQN
+    \Spatie\LaravelSettings\Events\SettingsLoaded::class,
+
+    // Whole-namespace wildcard
+    'Spatie\\LaravelSettings\\Events\\*',
+    'App\\Events\\Internal\\*',
+],
+```
+
+Notes:
+
+- Only the `auto_log.event_dispatch` listener is filtered. Explicit `Log::*('event.dispatched: ...')` calls go through unchanged.
+- Framework / Laravel-package events (`Illuminate\…`, `Laravel\…`, `Livewire\…`, `Filament\…`, `Stancl\…`, etc.) are already filtered internally, no need to list them.
+- Per-environment exclusions are just plain PHP — e.g. `'ignored_events' => app()->isProduction() ? [...] : []`.
+
 ---
 
 ## Payload format

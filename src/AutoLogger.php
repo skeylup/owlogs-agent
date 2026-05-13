@@ -494,6 +494,10 @@ class AutoLogger
                 }
             }
 
+            if ($this->matchesIgnoredEvent($eventName)) {
+                return;
+            }
+
             if (! class_exists($eventName)) {
                 return;
             }
@@ -510,6 +514,21 @@ class AutoLogger
 
             Log::channel('owlogs')->info('event.dispatched: '.class_basename($eventName), $context);
         });
+    }
+
+    private function matchesIgnoredEvent(string $eventName): bool
+    {
+        foreach ((array) config('owlogs.ignored_events', []) as $pattern) {
+            if (! is_string($pattern) || $pattern === '') {
+                continue;
+            }
+
+            if (Str::is($pattern, $eventName)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

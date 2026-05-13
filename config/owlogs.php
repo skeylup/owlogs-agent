@@ -277,6 +277,30 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Ignored Events
+    |--------------------------------------------------------------------------
+    |
+    | Event class names whose `event.dispatched: ...` auto-log must never be
+    | forwarded to Owlogs. Matched with `Str::is`, so wildcards (`*`) are
+    | supported — useful to silence a whole package namespace.
+    |
+    | Examples:
+    |
+    |   'ignored_events' => [
+    |       \Spatie\LaravelSettings\Events\SettingsLoaded::class,
+    |       'Spatie\\LaravelSettings\\Events\\*',
+    |       'App\\Events\\Internal\\*',
+    |   ],
+    |
+    | Only impacts the `auto_log.event_dispatch` listener. Explicit
+    | `Log::info('event.dispatched: ...')` calls are not filtered here.
+    |
+    */
+
+    'ignored_events' => [],
+
+    /*
+    |--------------------------------------------------------------------------
     | Auto-Logging
     |--------------------------------------------------------------------------
     */
