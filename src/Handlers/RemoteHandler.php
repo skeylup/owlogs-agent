@@ -391,6 +391,10 @@ class RemoteHandler extends AbstractProcessingHandler
             }
         }
 
+        if (isset($contextData['livewire_calls']) && is_array($contextData['livewire_calls']) && $contextData['livewire_calls'] !== []) {
+            $extra['livewire'] = ['calls' => $contextData['livewire_calls']];
+        }
+
         return empty($extra) ? null : json_encode($extra, JSON_UNESCAPED_UNICODE);
     }
 

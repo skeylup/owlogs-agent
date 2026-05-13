@@ -25,12 +25,14 @@ use Laravel\Octane\Events\RequestTerminated;
 use Laravel\Octane\Events\TaskTerminated;
 use Laravel\Octane\Events\WorkerStarting;
 use Laravel\Octane\Events\WorkerStopping;
+use Livewire\Livewire;
 use Skeylup\OwlogsAgent\Flushing\EndOfRequestPolicy;
 use Skeylup\OwlogsAgent\Flushing\FlushPolicy;
 use Skeylup\OwlogsAgent\Flushing\OctaneWindowPolicy;
 use Skeylup\OwlogsAgent\Flushing\RuntimeDetector;
 use Skeylup\OwlogsAgent\Handlers\RemoteHandler;
 use Skeylup\OwlogsAgent\Handlers\RemoteLogChannel;
+use Skeylup\OwlogsAgent\Livewire\OwlogsLivewireHook;
 use Skeylup\OwlogsAgent\Middleware\AddLogContext;
 use Skeylup\OwlogsAgent\Transport\FileLogBufferStore;
 use Skeylup\OwlogsAgent\Transport\InMemoryLogBufferStore;
@@ -100,6 +102,7 @@ class OwlogsAgentServiceProvider extends ServiceProvider
         $this->registerScheduleContext();
         $this->registerAutoInstrumentation();
         $this->registerAutoLogger();
+        $this->registerLivewireHook();
         $this->registerFlushHooks();
 
         if ($this->app->runningInConsole()) {
@@ -538,6 +541,26 @@ class OwlogsAgentServiceProvider extends ServiceProvider
     private function registerAutoLogger(): void
     {
         (new AutoLogger)->register();
+    }
+
+    /**
+     * Wire a Livewire ComponentHook so update endpoints get logged as
+     * `POST /livewire — Component::method` instead of the opaque hashed URL.
+     *
+     * No-op when Livewire isn't installed — keeps the agent compatible with
+     * classic Laravel / Inertia / API-only projects.
+     */
+    private function registerLivewireHook(): void
+    {
+        if (! config('owlogs.livewire.enabled', true)) {
+            return;
+        }
+
+        if (! class_exists(Livewire::class)) {
+            return;
+        }
+
+        Livewire::componentHook(OwlogsLivewireHook::class);
     }
 
     /**

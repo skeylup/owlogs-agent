@@ -225,21 +225,37 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | URI Resolver
+    | Livewire integration
     |--------------------------------------------------------------------------
     |
-    | Callback that can rewrite the URI captured for specific request types
-    | (Livewire updates, SPA routes, …) so the Owlogs UI can group by feature
-    | rather than by opaque endpoint.
-    |
-    | Default: the bundled Livewire resolver — turns
-    | `POST /livewire-{hash}/update` into `POST /livewire — Component::method`.
-    |
-    | Disable by setting `OWLOGS_URI_RESOLVER=` (empty) in your .env.
+    | When `livewire/livewire` is installed, the agent registers a
+    | ComponentHook that rewrites the URI of `/livewire/update` requests as
+    | `POST /livewire — Component::method` and stashes the list of
+    | invoked methods in `extra.livewire.calls`. No-op for projects without
+    | Livewire (classic Laravel, Inertia, API-only).
     |
     */
 
-    'uri_resolver' => env('OWLOGS_URI_RESOLVER', \Skeylup\OwlogsAgent\Support\LivewireUriResolver::class) ?: null,
+    'livewire' => [
+        'enabled' => env('OWLOGS_LIVEWIRE_HOOK', true),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | URI Resolver
+    |--------------------------------------------------------------------------
+    |
+    | Optional callback that can rewrite the URI captured for specific request
+    | types (custom SPA routes, Inertia, …) so the Owlogs UI can group by
+    | feature rather than by opaque endpoint. Livewire is handled natively by
+    | the integration above and does not need this hook.
+    |
+    | Receives `($request, array $fields)`. Use `Context::addHidden('uri', …)`
+    | inside the callback to override the captured URI.
+    |
+    */
+
+    'uri_resolver' => env('OWLOGS_URI_RESOLVER') ?: null,
 
     /*
     |--------------------------------------------------------------------------
