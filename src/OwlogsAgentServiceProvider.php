@@ -546,7 +546,14 @@ class OwlogsAgentServiceProvider extends ServiceProvider
      */
     private function registerAutoLogger(): void
     {
-        (new AutoLogger)->register();
+        $autoLogger = new AutoLogger;
+        $autoLogger->register();
+        $this->app->instance(AutoLogger::class, $autoLogger);
+
+        // Reset per-request state (e.g. the first-query-per-connection set
+        // used to flag `includes_connect`). Octane-safe: terminating fires
+        // on RequestTerminated and after each queue job.
+        $this->app->terminating(static fn () => $autoLogger->resetRequestState());
     }
 
     /**

@@ -40,6 +40,18 @@ use Illuminate\Support\Str;
  */
 class AutoLogger
 {
+    /**
+     * Tracks which connections already saw a query in the current request/job.
+     *
+     * Used to flag the first query of a connection as `includes_connect: true`
+     * — its `QueryExecuted::$time` includes the lazy `PDO::__construct()` cost
+     * (TCP, auth, SSL handshake), so the duration over-reports the actual SQL
+     * execution. Reset between requests/jobs to stay Octane-safe.
+     *
+     * @var array<string, true>
+     */
+    private array $firstQuerySeenPerConnection = [];
+
     public function register(): void
     {
         $config = config('owlogs.auto_log', []);
@@ -278,6 +290,13 @@ class AutoLogger
             $threshold = (float) ($config['slow_query_ms'] ?? 500);
 
             DB::listen(function (QueryExecuted $query) use ($threshold): void {
+                // Always claim the first-query slot, even when below threshold —
+                // otherwise a fast pre-warm query would mask the slow flag for
+                // the real first user query.
+                $connectionKey = $query->connectionName ?? 'default';
+                $includesConnect = ! isset($this->firstQuerySeenPerConnection[$connectionKey]);
+                $this->firstQuerySeenPerConnection[$connectionKey] = true;
+
                 if ($query->time < $threshold) {
                     return;
                 }
@@ -286,9 +305,14 @@ class AutoLogger
                     return;
                 }
 
-                Log::channel('owlogs')->warning('db.slow_query: '.round($query->time).'ms — '.Str::limit($query->sql, 100), [
+                $message = 'db.slow_query: '.round($query->time).'ms'
+                    .($includesConnect ? ' (incl. connect)' : '')
+                    .' — '.Str::limit($query->sql, 100);
+
+                Log::channel('owlogs')->warning($message, [
                     'sql' => Str::limit($query->sql, 500),
                     'duration_ms' => round($query->time, 2),
+                    'includes_connect' => $includesConnect,
                     'connection' => $query->connectionName,
                     'caller' => $this->resolveQueryCaller(),
                 ]);
@@ -609,6 +633,16 @@ class AutoLogger
             fn ($address) => $address->getAddress(),
             $addresses,
         );
+    }
+
+    /**
+     * Reset per-request state. Called on `app->terminating` so the
+     * `includes_connect` flag is accurate on the first query of each
+     * Octane request / queue job, not just the first one ever.
+     */
+    public function resetRequestState(): void
+    {
+        $this->firstQuerySeenPerConnection = [];
     }
 
     /**
