@@ -20,6 +20,11 @@ final class InMemoryLogBufferStore implements LogBufferStore
         foreach ($rows as $row) {
             $this->rows[] = $row;
         }
+
+        $maxRows = (int) config('owlogs.transport.buffer.max_rows', 0);
+        if ($maxRows > 0 && count($this->rows) > $maxRows) {
+            $this->rows = array_slice($this->rows, count($this->rows) - $maxRows);
+        }
     }
 
     public function drain(int $limit): array
@@ -37,5 +42,10 @@ final class InMemoryLogBufferStore implements LogBufferStore
     public function size(): int
     {
         return count($this->rows);
+    }
+
+    public function clear(): void
+    {
+        $this->rows = [];
     }
 }

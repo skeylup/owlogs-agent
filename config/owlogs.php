@@ -116,6 +116,57 @@ return [
             'batch_count' => env('OWLOGS_SHIP_BATCH_COUNT', 256),
         ],
 
+        /*
+        |----------------------------------------------------------------
+        | Buffer limits
+        |----------------------------------------------------------------
+        |
+        | Two guards that protect both ends of the pipeline when shipments
+        | stall:
+        |
+        |  - max_rows: hard cap on the cross-process buffer (Redis list /
+        |    JSONL file / in-memory array). When append() would push the
+        |    row count above the cap, the OLDEST rows are dropped FIFO so
+        |    the client's storage can never grow unbounded during an
+        |    outage or a tripped circuit. Set to 0 to disable the cap
+        |    (legacy unbounded behaviour).
+        |
+        |  - max_age_s: drain-time TTL. Rows whose `logged_at` is older
+        |    than this many seconds are filtered out before the HTTP POST.
+        |    Stops the agent from dumping a 1-hour backlog onto the server
+        |    in one burst once shipments recover. Set to 0 to disable.
+        |
+        */
+
+        'buffer' => [
+            'max_rows' => env('OWLOGS_BUFFER_MAX_ROWS', 5000),
+            'max_age_s' => env('OWLOGS_BUFFER_MAX_AGE_S', 60),
+        ],
+
+        /*
+        |----------------------------------------------------------------
+        | Ingest circuit breaker
+        |----------------------------------------------------------------
+        |
+        | The ship job trips a Cache-based breaker when the server returns
+        | a fatal status (403 = no subscription, 429 = quota exhausted).
+        | While the breaker is tripped:
+        |
+        |  - RemoteHandler::write() drops new records without buffering.
+        |  - flush() discards the in-memory batch without storing it.
+        |  - ShipBufferedLogsJob exits early after wiping the backlog.
+        |
+        | The breaker auto-rearms after `cooldown_s` — a tenant who
+        | upgrades / pays for more quota recovers on their own without
+        | any manual intervention.
+        |
+        */
+
+        'circuit' => [
+            'enabled' => env('OWLOGS_CIRCUIT_ENABLED', true),
+            'cooldown_s' => env('OWLOGS_CIRCUIT_COOLDOWN_S', 300),
+        ],
+
         'octane' => [
             'window_ms' => env('OWLOGS_OCTANE_WINDOW_MS', 2000),
             'batch_count' => env('OWLOGS_OCTANE_BATCH_COUNT', 20),

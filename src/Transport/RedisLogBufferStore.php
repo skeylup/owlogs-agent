@@ -32,6 +32,29 @@ end
 return items
 LUA;
 
+    /**
+     * RPUSH the new rows then LTRIM to keep at most `max_rows` items —
+     * runs as a single Redis command sequence under the EVAL atomicity
+     * guarantee, so a concurrent producer can never observe a buffer
+     * above the cap. When `max_rows <= 0`, the LTRIM step is skipped
+     * (unbounded buffer, opt-in only).
+     *
+     * KEYS[1] = list key
+     * ARGV[1] = max_rows
+     * ARGV[2..N] = JSON-encoded rows to push
+     */
+    private const APPEND_SCRIPT = <<<'LUA'
+local key = KEYS[1]
+local max = tonumber(ARGV[1])
+for i = 2, #ARGV do
+    redis.call('RPUSH', key, ARGV[i])
+end
+if max > 0 then
+    redis.call('LTRIM', key, -max, -1)
+end
+return redis.call('LLEN', key)
+LUA;
+
     public function __construct(
         private readonly string $connection,
         private readonly string $key,
@@ -56,8 +79,16 @@ LUA;
             return;
         }
 
+        $maxRows = (int) config('owlogs.transport.buffer.max_rows', 0);
+
         try {
-            Redis::connection($this->connection)->rpush($this->key, ...$encoded);
+            Redis::connection($this->connection)->eval(
+                self::APPEND_SCRIPT,
+                1,
+                $this->key,
+                $maxRows,
+                ...$encoded,
+            );
         } catch (Throwable) {
             // Silent: Redis may be momentarily unavailable. Losing a
             // buffered batch is preferable to cascading errors into the
@@ -103,6 +134,15 @@ LUA;
             return (int) Redis::connection($this->connection)->llen($this->key);
         } catch (Throwable) {
             return 0;
+        }
+    }
+
+    public function clear(): void
+    {
+        try {
+            Redis::connection($this->connection)->del($this->key);
+        } catch (Throwable) {
+            // Best-effort; the next append/drain will reconcile.
         }
     }
 }

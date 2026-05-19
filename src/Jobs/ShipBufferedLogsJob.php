@@ -12,6 +12,7 @@ use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Skeylup\OwlogsAgent\Handlers\RemoteHandler;
+use Skeylup\OwlogsAgent\Transport\IngestCircuit;
 use Skeylup\OwlogsAgent\Transport\LogBufferStore;
 use Throwable;
 
@@ -67,6 +68,17 @@ class ShipBufferedLogsJob implements ShouldQueue
         // channel: any Log::* here would buffer → spawn another ship
         // job → loop.
         RemoteHandler::suppressedWhile(function () use ($store): void {
+            // Circuit tripped (a previous ship hit 403/429 and the
+            // cooldown is still in flight): wipe the backlog and exit.
+            // Any rows in flight are guaranteed to fail with the same
+            // status — better to drop them now than to keep the queue
+            // busy and the client's buffer growing.
+            if (IngestCircuit::isTripped()) {
+                $store->clear();
+
+                return;
+            }
+
             $batchCount = (int) config('owlogs.transport.ship.batch_count', 256);
 
             $rows = $store->drain($batchCount);
@@ -74,18 +86,102 @@ class ShipBufferedLogsJob implements ShouldQueue
                 return;
             }
 
-            $this->sendAll($rows);
+            $rows = $this->dropStaleRows($rows);
+            if ($rows === []) {
+                if ($store->size() > 0) {
+                    $this->scheduleFollowUp();
+                }
 
-            if ($store->size() > 0) {
+                return;
+            }
+
+            $this->sendAll($rows, $store);
+
+            if ($store->size() > 0 && ! IngestCircuit::isTripped()) {
                 $this->scheduleFollowUp();
             }
         });
     }
 
     /**
+     * Filter out rows whose `logged_at` timestamp is older than the
+     * configured `buffer.max_age_s` window. Protects the server from a
+     * burst of stale data when shipments resume after a long stall
+     * (queue worker outage, network blip) and bounds the value of any
+     * data we still try to ship.
+     *
+     * Drop is silent — count goes into a single summary log on the
+     * local `single` channel (owlogs is suppressed inside handle()).
+     *
+     * @param  list<array<string, mixed>>  $rows
+     * @return list<array<string, mixed>>
+     */
+    private function dropStaleRows(array $rows): array
+    {
+        $maxAgeS = (int) config('owlogs.transport.buffer.max_age_s', 0);
+        if ($maxAgeS <= 0) {
+            return $rows;
+        }
+
+        $cutoff = (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))
+            ->modify('-'.$maxAgeS.' seconds');
+
+        $kept = [];
+        $dropped = 0;
+
+        foreach ($rows as $row) {
+            $loggedAt = $row['logged_at'] ?? null;
+
+            if (! is_string($loggedAt) || $loggedAt === '') {
+                $kept[] = $row;
+
+                continue;
+            }
+
+            $when = \DateTimeImmutable::createFromFormat(
+                'Y-m-d H:i:s.v',
+                $loggedAt,
+                new \DateTimeZone('UTC'),
+            );
+
+            // Unknown format — keep the row rather than silently lose it.
+            if ($when === false) {
+                $kept[] = $row;
+
+                continue;
+            }
+
+            if ($when < $cutoff) {
+                $dropped++;
+
+                continue;
+            }
+
+            $kept[] = $row;
+        }
+
+        if ($dropped > 0) {
+            try {
+                logger()->channel('single')->warning(
+                    'Owlogs dropped stale buffered logs',
+                    [
+                        'dropped' => $dropped,
+                        'kept' => count($kept),
+                        'max_age_s' => $maxAgeS,
+                    ],
+                );
+            } catch (Throwable) {
+                // best-effort
+            }
+        }
+
+        return $kept;
+    }
+
+    /**
      * @param  list<array<string, mixed>>  $rows
      */
-    private function sendAll(array $rows): void
+    private function sendAll(array $rows, LogBufferStore $store): void
     {
         $apiKey = (string) config('owlogs.api_key');
         if ($apiKey === '') {
@@ -96,14 +192,23 @@ class ShipBufferedLogsJob implements ShouldQueue
         $maxBytes = (int) config('owlogs.transport.max_payload_bytes', 512 * 1024);
 
         foreach ($this->chunkBySize($rows, $maxBytes) as $chunk) {
-            $this->sendChunk($chunk, $apiKey);
+            // If a previous chunk in this job tripped the circuit,
+            // stop iterating — clear the store and exit before we try
+            // to POST another doomed chunk.
+            if (IngestCircuit::isTripped()) {
+                $store->clear();
+
+                return;
+            }
+
+            $this->sendChunk($chunk, $apiKey, $store);
         }
     }
 
     /**
      * @param  list<array<string, mixed>>  $chunk
      */
-    private function sendChunk(array $chunk, string $apiKey): void
+    private function sendChunk(array $chunk, string $apiKey, LogBufferStore $store): void
     {
         $timeout = (int) config('owlogs.transport.timeout_s', 30);
         $compression = (bool) config('owlogs.transport.compression', true);
@@ -138,13 +243,23 @@ class ShipBufferedLogsJob implements ShouldQueue
 
             $status = $response->status();
 
+            // 403 (no plan) and 429 (quota exhausted) are fatal at the
+            // tenant level — retrying just burns CPU for the same
+            // verdict. Trip the circuit so further records get dropped
+            // on the floor for the configured cooldown, wipe the
+            // backlog so we don't carry it through, and fail() so this
+            // job stops retrying.
             if ($status === 403) {
+                IngestCircuit::trip(403, 'subscription_required');
+                $store->clear();
                 $this->fail(new \RuntimeException('Owlogs subscription required: '.$response->body()));
 
                 return;
             }
 
             if ($status === 429) {
+                IngestCircuit::trip(429, 'quota_exhausted');
+                $store->clear();
                 $this->fail(new \RuntimeException('Owlogs quota exhausted: '.$response->body()));
 
                 return;

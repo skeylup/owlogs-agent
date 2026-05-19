@@ -14,6 +14,7 @@ use Skeylup\OwlogsAgent\Contracts\HasLogContext;
 use Skeylup\OwlogsAgent\Flushing\EndOfRequestPolicy;
 use Skeylup\OwlogsAgent\Flushing\FlushPolicy;
 use Skeylup\OwlogsAgent\Jobs\ShipBufferedLogsJob;
+use Skeylup\OwlogsAgent\Transport\IngestCircuit;
 use Skeylup\OwlogsAgent\Transport\InMemoryLogBufferStore;
 use Skeylup\OwlogsAgent\Transport\LogBufferStore;
 use Throwable;
@@ -134,6 +135,14 @@ class RemoteHandler extends AbstractProcessingHandler
             return;
         }
 
+        // Circuit tripped (server returned 403/429 within the cooldown
+        // window): drop the record outright. Buffering it would just
+        // grow the client's Redis/file backlog for shipments we know
+        // will be rejected anyway.
+        if (IngestCircuit::isTripped()) {
+            return;
+        }
+
         $row = $this->buildRow($record);
         $encoded = json_encode($row, JSON_UNESCAPED_UNICODE);
         $this->bufferBytes += $encoded !== false ? strlen($encoded) : 0;
@@ -196,6 +205,14 @@ class RemoteHandler extends AbstractProcessingHandler
             $this->bufferBytes = 0;
             $this->firstBufferedAt = null;
 
+            // Circuit tripped: drop the in-memory batch without writing
+            // to the cross-process store and without dispatching a ship
+            // job. Reduces both client-side congestion (Redis/file
+            // backlog) and server-side surge once the cooldown lifts.
+            if (IngestCircuit::isTripped()) {
+                return;
+            }
+
             if (config('owlogs.measure.memory', true)) {
                 $lastIdx = count($rows) - 1;
                 $rows[$lastIdx]['memory_peak_mb'] = (int) round(memory_get_peak_usage(true) / 1024 / 1024);
@@ -229,6 +246,15 @@ class RemoteHandler extends AbstractProcessingHandler
      */
     private function scheduleShip(): void
     {
+        // Belt-and-braces guard: flush() already checked, but a caller
+        // could in theory reach scheduleShip() through another path
+        // (subclassing, future hook). Skip the dispatch if the circuit
+        // is tripped — we don't want any ship jobs sitting in the queue
+        // during cooldown.
+        if (IngestCircuit::isTripped()) {
+            return;
+        }
+
         $debounceMs = (int) config('owlogs.transport.ship.debounce_ms', 10000);
         $debounceSec = max(1, (int) ceil($debounceMs / 1000));
         // Keep the marker alive well past the delay so late arrivals

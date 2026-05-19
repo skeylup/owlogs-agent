@@ -28,6 +28,23 @@ final class FileLogBufferStore implements LogBufferStore
 
         $this->ensureDirectory();
 
+        $maxRows = (int) config('owlogs.transport.buffer.max_rows', 0);
+
+        // Fast path: no cap → plain append, no read/rewrite.
+        if ($maxRows <= 0) {
+            $this->appendUnbounded($rows);
+
+            return;
+        }
+
+        $this->appendBounded($rows, $maxRows);
+    }
+
+    /**
+     * @param  list<array<string, mixed>>  $rows
+     */
+    private function appendUnbounded(array $rows): void
+    {
         $fh = @fopen($this->path, 'ab');
         if ($fh === false) {
             return;
@@ -47,6 +64,65 @@ final class FileLogBufferStore implements LogBufferStore
                     @fwrite($fh, $json."\n");
                 }
                 @fflush($fh);
+            } finally {
+                @flock($fh, LOCK_UN);
+            }
+        } finally {
+            @fclose($fh);
+        }
+    }
+
+    /**
+     * Bounded append: read existing lines, push new ones, drop the oldest
+     * to keep at most $maxRows lines, rewrite the file atomically under
+     * LOCK_EX. Same I/O cost as a drain, so acceptable for typical
+     * payload sizes (≤ a few thousand rows).
+     *
+     * @param  list<array<string, mixed>>  $rows
+     */
+    private function appendBounded(array $rows, int $maxRows): void
+    {
+        $fh = @fopen($this->path, 'c+');
+        if ($fh === false) {
+            return;
+        }
+
+        try {
+            if (! flock($fh, LOCK_EX)) {
+                return;
+            }
+
+            try {
+                rewind($fh);
+                $existing = [];
+                while (($line = fgets($fh)) !== false) {
+                    $trimmed = rtrim($line, "\r\n");
+                    if ($trimmed !== '') {
+                        $existing[] = $trimmed;
+                    }
+                }
+
+                $appended = [];
+                foreach ($rows as $row) {
+                    $json = json_encode($row, JSON_UNESCAPED_UNICODE);
+                    if ($json === false) {
+                        continue;
+                    }
+                    $appended[] = $json;
+                }
+
+                $all = array_merge($existing, $appended);
+                if (count($all) > $maxRows) {
+                    $all = array_slice($all, count($all) - $maxRows);
+                }
+
+                ftruncate($fh, 0);
+                rewind($fh);
+
+                if ($all !== []) {
+                    @fwrite($fh, implode("\n", $all)."\n");
+                    @fflush($fh);
+                }
             } finally {
                 @flock($fh, LOCK_UN);
             }
@@ -136,6 +212,33 @@ final class FileLogBufferStore implements LogBufferStore
                 }
 
                 return $count;
+            } finally {
+                @flock($fh, LOCK_UN);
+            }
+        } finally {
+            @fclose($fh);
+        }
+    }
+
+    public function clear(): void
+    {
+        if (! is_file($this->path)) {
+            return;
+        }
+
+        $fh = @fopen($this->path, 'c+');
+        if ($fh === false) {
+            return;
+        }
+
+        try {
+            if (! flock($fh, LOCK_EX)) {
+                return;
+            }
+
+            try {
+                @ftruncate($fh, 0);
+                @fflush($fh);
             } finally {
                 @flock($fh, LOCK_UN);
             }
