@@ -313,6 +313,7 @@ class RemoteHandler extends AbstractProcessingHandler
         return [
             'trace_id' => $contextData['trace_id'] ?? null,
             'span_id' => $contextData['span_id'] ?? null,
+            'parent_span_id' => $contextData['parent_span_id'] ?? null,
             'origin' => $contextData['origin'] ?? null,
 
             'level_name' => $record->level->getName(),

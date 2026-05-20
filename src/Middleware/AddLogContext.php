@@ -41,13 +41,17 @@ class AddLogContext
         Context::forgetHidden('measures');
         Context::forgetHidden('breadcrumbs');
 
-        // Tracing IDs
+        // Tracing IDs — span_id is the per-execution identity; trace_id is
+        // the cross-execution correlation. Keeping them distinct lets the
+        // viewer build a parent/child tree when a request dispatches a job:
+        // the job inherits the HTTP span_id as its parent_span_id via the
+        // queue payload (see OwlogsAgentServiceProvider::registerQueueContext).
         if ($fields['trace_id'] ?? true) {
             Context::addHidden('trace_id', (string) Str::ulid());
         }
 
         if ($fields['span_id'] ?? true) {
-            Context::addHidden('span_id', Context::getHidden('trace_id') ?? (string) Str::ulid());
+            Context::addHidden('span_id', (string) Str::ulid());
         }
 
         if ($fields['origin'] ?? true) {

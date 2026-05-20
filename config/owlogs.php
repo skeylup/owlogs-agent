@@ -184,6 +184,7 @@ return [
     'fields' => [
         'trace_id' => true,
         'span_id' => true,
+        'parent_span_id' => true,
         'origin' => true,
         'app_name' => true,
         'app_env' => true,

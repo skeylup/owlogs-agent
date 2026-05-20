@@ -167,6 +167,15 @@ class OwlogsAgentServiceProvider extends ServiceProvider
         Context::hydrated(function (Repository $context): void {
             $fields = config('owlogs.fields', []);
 
+            // Capture the dispatcher's span_id as our parent BEFORE the new
+            // job-run span_id overwrites it. Laravel auto-propagates hidden
+            // Context keys into job payloads, so at this point `span_id`
+            // holds the value that was current when the job was dispatched
+            // (HTTP request, scheduled task, or another job).
+            if (($fields['parent_span_id'] ?? true) && $context->hasHidden('span_id')) {
+                $context->addHidden('parent_span_id', (string) $context->getHidden('span_id'));
+            }
+
             if ($fields['span_id'] ?? true) {
                 $context->addHidden('span_id', (string) Str::ulid());
             }
@@ -367,7 +376,7 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             }
 
             if ($fields['span_id'] ?? true) {
-                Context::addHiddenIf('span_id', Context::getHidden('trace_id') ?? (string) Str::ulid());
+                Context::addHiddenIf('span_id', (string) Str::ulid());
             }
 
             if ($fields['origin'] ?? true) {
@@ -468,7 +477,7 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             }
 
             if ($fields['span_id'] ?? true) {
-                Context::addHidden('span_id', Context::getHidden('trace_id') ?? (string) Str::ulid());
+                Context::addHidden('span_id', (string) Str::ulid());
             }
 
             if ($fields['origin'] ?? true) {
