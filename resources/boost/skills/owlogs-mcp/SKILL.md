@@ -50,6 +50,14 @@ cheaper one came back empty or ambiguous.
    = how many copies of the same query fired in ONE request). Sort by
    `duplicate_count` to rank by per-request severity, or by
    `occurrences` to find the most-fired N+1 across the workspace.
+2quater. **"Which files / methods break the most?"** → `top_errored_symbols`
+   ranks `caller_file` / `caller_method` / `caller_line` by error
+   occurrence count over the window, with affected user / distinct trace
+   counts and a sample trace_id. Pass `group_by: "file"` for a coarse
+   leaderboard, `"method"` (default) for the sweet spot, `"line"` to
+   pinpoint specific call sites in big files. Filter to a directory with
+   `path_contains: "app/Http/Controllers"`. The natural follow-up: open
+   the symbol locally and `get_trace_markdown(sample_trace_id)` to fix.
 3. **Targeted exact match** (a route, a user_id, a job class, a `trace_id`)
    → `search_logs_by_field`.
 4. **Composable filters across columns** (level + route + time + free-text
@@ -84,10 +92,20 @@ For perf:
 - `analyze_route_performance` returns p50/p95/max + top errors + slowest
   traces in **one** call.
 - `analyze_measures` aggregates `measures[].label/duration_ms` instrumentation.
+- `list_slow_traces` ranks individual traces by `duration` (default,
+  MAX(duration_ms) per trace), `memory` (MAX(memory_peak_mb)), or
+  `entries` (COUNT(*) of log lines per trace — good proxy for
+  query-heavy / chatty traces). Combine with `min_duration_ms`,
+  `min_memory_mb`, or `min_entries` thresholds to filter noise.
 
 For correlation / impact:
 
 - `who_was_affected(trace_id|issue_id)` → distinct users, emails, routes.
+- `get_user_recent_errors(user_id)` → last N error traces for ONE
+  upstream user (use when a real user complained — pass the opaque
+  `user_id` exactly as the upstream app emitted it, bigint / UUID /
+  ULID / email / slug). Cheaper and tighter than `search_logs_by_field`
+  as it pre-dedupes by trace_id and filters to error severities.
 - `compare_deployments(base_sha, head_sha)` → NEW vs disappeared error
   messages between two deploys.
 
@@ -245,22 +263,33 @@ You **cannot** switch workspace within a session — don't try.
 
 ## Token cost transparency
 
-Most tools cost ZERO owlogs (`whoami`, `list_workspaces`, `traffic_overview`,
-`search_logs_*`, `count_logs`, `list_traces`, `list_recent_errors`,
-`list_slow_traces`, `list_failing_jobs`, `list_issues`, `get_issue`,
-`list_slow_queries`, `list_n_plus_one`, `analyze_route_performance`,
-`analyze_measures`, `who_was_affected`, `compare_deployments`,
-`get_trace_summary`, `get_trace_markdown`, `get_log_entry`,
-`build_trace_url`, every `github_*`). They're pure DB / GitHub HTTP reads.
+Every MCP HTTP call debits a flat fee from the workspace's `ai_tokens`
+entitlement (the IDE transport runs a billing middleware on each
+`tools/call`). Five tiers, cheapest first:
 
-The owlogs-spending tools are exactly three: `summarize_stacktrace`,
-`summarize_trace_narrative`, `extract_root_cause`. They run a small LLM
-sub-agent server-side. Use them when you need *prose* output, not when
-you need raw data to reason about — for the latter,
-`get_trace_markdown` is the right call and it's free.
+| Tier | Owlogs per call | Tools |
+|---|---|---|
+| `light` | 1 | `whoami`, `list_workspaces`, `build_trace_url` |
+| `medium` (default) | 5 | `traffic_overview`, `count_logs`, `list_*`, `search_logs_by_field / _advanced / _by_json / _text`, `get_trace_summary`, `get_log_entry`, `analyze_route_performance`, `analyze_measures`, `top_errored_symbols`, `who_was_affected`, `get_user_recent_errors`, `compare_deployments`, every `github_*` |
+| `heavy` | 15 | `search_logs_semantic`, `get_trace`, `get_trace_markdown` |
+| `hybrid` | 20 | `search_logs_hybrid` (embedding + Cohere rerank) |
+| `llm` | 5 flat + actual LLM tokens | `summarize_stacktrace`, `summarize_trace_narrative`, `extract_root_cause` |
 
-Every response carries a `X-Owlogs-Spent` and `X-Owlogs-Remaining` header.
-The user is billed in **owlogs** (≈ \$0.70 per million owlogs), debited
-from their workspace's `ai_tokens` entitlement. Tools that **don't** call
-an LLM (search, get, count, list) cost zero owlogs — only the
-`summarize_*` and `extract_root_cause` tools spend the entitlement.
+The flat fee covers the DB / HTTP / transport infra cost — even
+pure-DB tools spend a non-zero number of owlogs per call. Add the
+ACTUAL LLM token cost on top for `summarize_*` and `extract_root_cause`.
+
+Every response carries `X-Owlogs-Spent` (this call) and
+`X-Owlogs-Remaining` (workspace balance after debit) headers. The user
+is billed in **owlogs** (≈ \$0.70 per million), debited from the
+workspace's `ai_tokens` entitlement. If `whoami` reports
+`status=exhausted` STOP — every subsequent call returns HTTP 402.
+
+Cost-minimising rules of thumb:
+- For raw data, use `get_trace_markdown` (heavy, but a single call gives
+  you the full picture — no LLM cost on top).
+- For prose, use `summarize_trace_narrative` (llm tier: short output,
+  cheap LLM call).
+- Cascade cheap → expensive: `traffic_overview` (medium) → `list_issues`
+  (medium) → `search_logs_advanced` (medium) → `search_logs_hybrid`
+  (hybrid) only if the cheaper lexical/structured filters came up empty.
