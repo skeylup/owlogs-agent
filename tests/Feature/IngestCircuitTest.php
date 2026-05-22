@@ -7,7 +7,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Monolog\Level;
 use Monolog\LogRecord;
-use Skeylup\OwlogsAgent\Handlers\RemoteHandler;
+use Skeylup\OwlogsAgent\Handlers\RemoteHandlerV3;
 use Skeylup\OwlogsAgent\Jobs\ShipBufferedLogsJob;
 use Skeylup\OwlogsAgent\Transport\IngestCircuit;
 use Skeylup\OwlogsAgent\Transport\InMemoryLogBufferStore;
@@ -36,7 +36,7 @@ afterEach(function (): void {
 function makeRecord(string $message = 'hello'): LogRecord
 {
     return new LogRecord(
-        datetime: new \DateTimeImmutable('now', new \DateTimeZone('UTC')),
+        datetime: new DateTimeImmutable('now', new DateTimeZone('UTC')),
         channel: 'test',
         level: Level::Info,
         message: $message,
@@ -85,7 +85,7 @@ it('does NOT trip the circuit on a 5xx transient error', function (): void {
 
     try {
         $job->handle($this->store);
-    } catch (\Throwable) {
+    } catch (Throwable) {
         // 5xx throws inside the job to trigger Laravel's retry mechanism.
     }
 
@@ -110,21 +110,21 @@ it('ShipBufferedLogsJob exits early and clears the store when circuit is already
 it('RemoteHandler::write() drops records when circuit is tripped', function (): void {
     IngestCircuit::trip(403, 'subscription_required');
 
-    $handler = new RemoteHandler(store: $this->store);
+    $handler = new RemoteHandlerV3(store: $this->store);
 
     // Call protected write() via reflection so we don't depend on
     // Monolog's full handle/handleBatch wiring in tests.
-    $reflection = new \ReflectionMethod($handler, 'write');
+    $reflection = new ReflectionMethod($handler, 'write');
     $reflection->invoke($handler, makeRecord('dropped'));
 
     expect($handler->bufferCount())->toBe(0);
 });
 
 it('RemoteHandler::flush() discards buffered rows without storing when circuit is tripped', function (): void {
-    $handler = new RemoteHandler(store: $this->store);
+    $handler = new RemoteHandlerV3(store: $this->store);
 
     // Buffer a record while circuit is closed.
-    $write = new \ReflectionMethod($handler, 'write');
+    $write = new ReflectionMethod($handler, 'write');
     $write->invoke($handler, makeRecord('queued'));
     expect($handler->bufferCount())->toBe(1);
 
@@ -142,9 +142,9 @@ it('does not dispatch ship jobs while the circuit is tripped', function (): void
 
     IngestCircuit::trip(403, 'subscription_required');
 
-    $handler = new RemoteHandler(store: $this->store);
+    $handler = new RemoteHandlerV3(store: $this->store);
 
-    $write = new \ReflectionMethod($handler, 'write');
+    $write = new ReflectionMethod($handler, 'write');
     $write->invoke($handler, makeRecord('ignored'));
 
     Bus::assertNotDispatched(ShipBufferedLogsJob::class);
@@ -169,8 +169,8 @@ it('drops rows older than max_age_s at drain time', function (): void {
     Http::fake(['*' => Http::response('', 200)]);
     config(['owlogs.transport.buffer.max_age_s' => 30]);
 
-    $staleAt = (new \DateTimeImmutable('-2 minutes', new \DateTimeZone('UTC')))->format('Y-m-d H:i:s.v');
-    $freshAt = (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format('Y-m-d H:i:s.v');
+    $staleAt = (new DateTimeImmutable('-2 minutes', new DateTimeZone('UTC')))->format('Y-m-d H:i:s.v');
+    $freshAt = (new DateTimeImmutable('now', new DateTimeZone('UTC')))->format('Y-m-d H:i:s.v');
 
     $this->store->append([
         ['message' => 'stale', 'logged_at' => $staleAt],
@@ -195,7 +195,7 @@ it('does not filter rows when max_age_s is 0', function (): void {
     Http::fake(['*' => Http::response('', 200)]);
     config(['owlogs.transport.buffer.max_age_s' => 0]);
 
-    $staleAt = (new \DateTimeImmutable('-2 hours', new \DateTimeZone('UTC')))->format('Y-m-d H:i:s.v');
+    $staleAt = (new DateTimeImmutable('-2 hours', new DateTimeZone('UTC')))->format('Y-m-d H:i:s.v');
 
     $this->store->append([['message' => 'stale', 'logged_at' => $staleAt]]);
 

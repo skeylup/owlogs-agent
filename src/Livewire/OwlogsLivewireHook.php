@@ -4,9 +4,10 @@ declare(strict_types=1);
 
 namespace Skeylup\OwlogsAgent\Livewire;
 
-use Illuminate\Support\Facades\Context;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Request;
 use Livewire\ComponentHook;
+use Skeylup\OwlogsAgent\Compat\ContextShim;
 
 /**
  * Captures Livewire component activity into the Owlogs Context so the
@@ -42,7 +43,7 @@ class OwlogsLivewireHook extends ComponentHook
      */
     public function hydrate($memo): void
     {
-        if (Context::hasHidden('livewire_label')) {
+        if (ContextShim::hasHidden('livewire_label')) {
             return;
         }
 
@@ -64,16 +65,26 @@ class OwlogsLivewireHook extends ComponentHook
         $label = $name.'::'.$method;
         $this->applyLabel($label);
 
-        $existing = Context::getHidden('livewire_calls');
-        if (is_array($existing) && count($existing) >= self::MAX_CALLS_STORED) {
-            return;
+        $existing = ContextShim::getHidden('livewire_calls');
+        $existingCount = is_array($existing) ? count($existing) : 0;
+
+        if ($existingCount < self::MAX_CALLS_STORED) {
+            ContextShim::pushHidden('livewire_calls', [
+                'component' => $name,
+                'method' => (string) $method,
+                'params' => $this->sanitizeParams(is_array($params) ? $params : []),
+            ]);
         }
 
-        Context::pushHidden('livewire_calls', [
-            'component' => $name,
-            'method' => (string) $method,
-            'params' => $this->sanitizeParams(is_array($params) ? $params : []),
-        ]);
+        // Optional standalone auto-log so the call appears as a discrete line
+        // in the trace timeline, not just embedded in extra.livewire.calls.
+        // Toggled via owlogs.auto_log.livewire_call (off by default).
+        if (config('owlogs.auto_log.livewire_call', false)) {
+            Log::channel('owlogs')?->debug('livewire.call: '.$label, [
+                'component' => $name,
+                'method' => (string) $method,
+            ]);
+        }
     }
 
     /**
@@ -84,11 +95,11 @@ class OwlogsLivewireHook extends ComponentHook
      */
     private function applyLabel(string $label): void
     {
-        Context::addHidden('livewire_label', $label);
-        Context::addHidden('route_action', $label);
+        ContextShim::addHidden('livewire_label', $label);
+        ContextShim::addHidden('route_action', $label);
 
         $method = Request::method();
-        Context::addHidden('uri', $method.' /livewire — '.$label);
+        ContextShim::addHidden('uri', $method.' /livewire — '.$label);
     }
 
     /**

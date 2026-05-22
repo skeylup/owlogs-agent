@@ -1,6 +1,6 @@
 ---
 name: owlogs-agent
-description: 'ACTIVATE when the user asks to add logging, instrument a Laravel app, improve observability, trace workflows, add breadcrumbs, or when they mention owlogs, Owlogs, OWLOGS_, skeylup/owlogs-agent, Skeylup\OwlogsAgent, Breadcrumb::, Measure::, HasLogContext, or reference config/owlogs.php. Also activate when the user edits controllers, Livewire components, Actions, Services, Jobs, Listeners, Observers, or webhooks with the intent of adding Log::*, or asks ''where should I log this?'', ''add observability to this flow'', ''instrument these endpoints'', ''trace this request''. Guides the agent to add workflow-level logging that captures real business actions and decisions (state changes, external calls, branches, failures) and NOT data reads, view rendering, or framework internals. Relies on skeylup/owlogs-agent which auto-captures request / queue / command / exception context. Do NOT activate for generic log-level or logging-config questions unrelated to instrumenting app code, nor for other log shippers (Sentry, Flare, Bugsnag, Papertrail, ELK).'
+description: 'ACTIVATE when the user asks to add logging, instrument a Laravel app, improve observability, trace workflows, or when they mention owlogs, Owlogs, OWLOGS_, skeylup/owlogs-agent, Skeylup\OwlogsAgent, Measure::, HasLogContext, or reference config/owlogs.php. Also activate when the user edits controllers, Livewire components, Actions, Services, Jobs, Listeners, Observers, or webhooks with the intent of adding Log::*, or asks ''where should I log this?'', ''add observability to this flow'', ''instrument these endpoints'', ''trace this request''. Guides the agent to add workflow-level logging that captures real business actions and decisions (state changes, external calls, branches, failures) and NOT data reads, view rendering, or framework internals. Relies on skeylup/owlogs-agent which auto-captures request / queue / command / exception context. Do NOT activate for generic log-level or logging-config questions unrelated to instrumenting app code, nor for other log shippers (Sentry, Flare, Bugsnag, Papertrail, ELK).'
 license: MIT
 metadata:
   author: skeylup
@@ -17,7 +17,12 @@ You are adding logging to a Laravel codebase that uses `skeylup/owlogs-agent`.
 - Propagates the same `trace_id` from HTTP → queue jobs → artisan commands.
 - Captures queue job class / attempt / queue / connection, artisan command name + args.
 - Attaches exception stacktraces on `Log::error(..., ['exception' => $e])` and `report()`.
-- Auto-events enabled by default (see `config/owlogs.php → auto_log`): auth, jobs, mail, notifications, slow queries, cache, HTTP client errors, model changes, app events. `migration` and `schedule` are opt-in. Toggle via `OWLOGS_AUTO_*` env vars.
+- Auto-events enabled by default (see `config/owlogs.php → auto_log`): auth, jobs, mail, notifications, slow queries, cache, HTTP client errors, model changes, app events, `route.matched`. `migration`, `schedule`, `db.transaction.*`, and `livewire.call` are opt-in. Toggle via `OWLOGS_AUTO_*` env vars.
+- Configurable auto-log sources worth knowing:
+  - `OWLOGS_AUTO_ROUTE_MATCHED` (on by default) — emits `route.matched` when the router resolves the route.
+  - `OWLOGS_AUTO_DB_TRANSACTION` (off by default) — emits `db.transaction.committed` / `db.transaction.rolled_back`.
+  - `OWLOGS_AUTO_LIVEWIRE_CALL` (off by default) — emits `livewire.call: Component::method` for each Livewire action.
+- **If a step deserves to appear in the trace timeline, emit an explicit `Log::info('[step.name]', [...])` — correlation by `trace_id` produces the same chronological narrative without any separate "trail" abstraction.**
 
 Your job is to instrument the **application layer** — the part the package cannot see — so reading one `trace_id` reconstructs the business story.
 
@@ -39,14 +44,14 @@ A log line must answer **"what just changed, was decided, or left this app?"** �
 ### ❌ Do NOT log
 - Reads (`Model::find`, `->get()`, `->paginate()`) unless the read itself *is* the business action (exports, reports).
 - View rendering, Blade partial loads, Livewire hydration, `mount()` / `render()`.
-- Steps already captured by a `Breadcrumb::add()` — don't double-log.
+- Steps already captured by the auto-log framework (`route.matched`, `mail.sent`, `job.started`, `db.transaction.committed`, etc.) — don't duplicate them with explicit `Log::*`.
 - Framework internals (middleware chains, container, config reads).
 - Loops: one log for the batch outcome, never one per iteration unless an iteration fails.
 - Debug statements ("got here", "value is X"). Use `Log::debug()` sparingly.
 
 ## Never put this in any log payload
 
-Regardless of the call site (`Log::*`, `Breadcrumb::add()` detail, `Measure::*` meta, `toLogContext()` return) — these never go in:
+Regardless of the call site (`Log::*`, `Measure::*` meta, `toLogContext()` return) — these never go in:
 
 - Secrets: API keys, tokens, JWTs, `.env` values, hashed passwords, 2FA seeds, signing secrets, OAuth state nonces.
 - Full credit-card numbers, full IBANs, CVV — last 4 digits at most.
@@ -72,54 +77,14 @@ Rule of thumb: if you'd be uncomfortable seeing the row pasted into a shared Sla
 
 ```php
 use Illuminate\Support\Facades\Log;
-use Skeylup\OwlogsAgent\Breadcrumb;
 use Skeylup\OwlogsAgent\Measure;
 use Skeylup\OwlogsAgent\Contracts\HasLogContext;
 ```
 
 - `Log::info('Order placed', ['order' => $order, 'amount_cents' => $order->total]);`
   Pass Eloquent models directly when they implement `HasLogContext` — curated, no accidental leak.
-- `Breadcrumb::add('CreateOrderAction::execute');` — trail inside a flow without emitting a log row.
 - `Measure::track('stripe.charge', fn () => $stripe->charges->create([...]));` — time an external call, attached to the request's measures.
 - `Measure::checkpoint('feature_flag.resolved', ['flag' => 'new_checkout', 'value' => true]);` — instant marker.
-
-## Breadcrumb rules
-
-Breadcrumbs are the **silent trail** of a request / job — a flat list of strings that appears alongside every log row, answering "what steps happened before this?". Internally each call pushes a string onto `Context::push('breadcrumbs', ...)`.
-
-### API
-- `Breadcrumb::add(string $label, ?string $detail = null)` — pushes one entry. If `$detail` is given, the stored entry is `"{$label}: {$detail}"`.
-- `Breadcrumb::all(): list<string>` — inspect the current trail.
-- `Breadcrumb::clear(): void` — wipe it (very rare; context resets per request/job).
-
-### When to drop one
-- At the **entry of a meaningful method** in the request path: actions, services, listeners, observers, job `handle()`, webhook handlers.
-- Just **before an important branch** when the path taken matters for post-mortem (`Breadcrumb::add('CheckoutFlow', 'variant=B')`).
-- Each time a **boundary is crossed**: HTTP → queue dispatch, queue → external call, listener → service.
-
-### Label format
-- `ClassName@method` (mirrors PHP stacktrace style) or `ClassName::action` for static / semantic steps.
-- `$detail` is a short string (≤80 chars): an event type, a slug, a decision — **never a payload**.
-
-### Don't
-- Don't breadcrumb inside tight loops — one entry for the batch, not per iteration.
-- Don't breadcrumb every private helper — the trail becomes noise past ~20 entries per request.
-- Don't put secrets, tokens, emails, SQL, JSON, or full IDs as the detail.
-- Don't use breadcrumbs **instead** of logs — they have no message, no level, no metadata dict. A flow with 15 breadcrumbs should still emit 1–3 `Log::*` lines (entry / outcome / failure).
-
-### Example
-```php
-public function handle(StripeEvent $event): void
-{
-    Breadcrumb::add('StripeWebhook@handle', $event->type);
-
-    match ($event->type) {
-        'invoice.paid'   => $this->onInvoicePaid($event),
-        'invoice.failed' => $this->onInvoiceFailed($event),
-        default          => Breadcrumb::add('StripeWebhook@ignored', $event->type),
-    };
-}
-```
 
 ## Measure rules
 
@@ -335,7 +300,7 @@ For central-scope actions (signup, central User billing) tenant context is N/A �
 
 ## Per-layer rules — where the log actually goes
 
-A request usually crosses multiple layers (Controller → Action → Service → external call). Log at the **highest meaningful boundary** — the layer that answers *"what did the user/system intend?"*, not at every step. Use breadcrumbs to record the intermediate path.
+A request usually crosses multiple layers (Controller → Action → Service → external call). Log at the **highest meaningful boundary** — the layer that answers *"what did the user/system intend?"*, not at every step. If an intermediate step genuinely matters for post-mortem, emit a dedicated `Log::info('[step.name]', [...])` — same `trace_id`, same chronological story.
 
 ### Livewire components
 
@@ -359,7 +324,6 @@ Always answer: **who did what, on which record, with what change?** The package 
 ```php
 public function save(): void
 {
-    Breadcrumb::add(static::class.'@save');
     $this->validate();
     $this->order->update($this->only(['status', 'shipping_method']));
 
@@ -390,7 +354,6 @@ public function updatedQuantity(int $value): void
 
 public function addToCart(): void
 {
-    Breadcrumb::add(static::class.'@addToCart');
     $this->cart->add($this->product, $this->quantity);
     Log::info('Item added to cart', [
         'cart'       => $this->cart,
@@ -419,15 +382,13 @@ Route info is auto-captured — keep call-site logs focused on outcome:
 
 ### Actions / Services / Use Cases
 
-Single-responsibility classes are the natural place for **one entry breadcrumb + one outcome log**. The class name *is* the action name — leverage it.
+Single-responsibility classes are the natural place for **one outcome log per public method**. The class name *is* the action name — leverage it.
 
 ```php
 final class RefundOrderAction
 {
     public function handle(Order $order, int $cents, string $reason): Refund
     {
-        Breadcrumb::add(static::class);
-
         $refund = Measure::track(
             'stripe.refund',
             fn () => $this->stripe->refunds->create([/* ... */]),
@@ -461,8 +422,6 @@ abstract class BaseImporter
 {
     public function import(string $path): ImportResult
     {
-        Breadcrumb::add(static::class.'@import'); // static = concrete subclass
-
         $result = Measure::track(
             'import.run',
             fn () => $this->run($path),
@@ -494,8 +453,6 @@ The package auto-captures dispatch, start, finish, fail (queue / connection / at
 ```php
 public function handle(): void
 {
-    Breadcrumb::add(static::class);
-
     $report = Measure::track(
         'report.generate',
         fn () => $this->builder->build($this->periodId),
@@ -531,7 +488,7 @@ public function failed(\Throwable $e): void
       'reason'  => 'rate-limit cooldown',
   ]);
   ```
-- Owlogs-pipeline jobs (anything wrapped in `RemoteHandler::suppressedWhile()` per project convention) must not produce business `Log::info` lines — they're suppressed by design. Use `Measure::checkpoint` / `Breadcrumb` for observability instead.
+- Owlogs-pipeline jobs (anything wrapped in `RemoteHandler::suppressedWhile()` per project convention) must not produce business `Log::info` lines — they're suppressed by design. Use `Measure::checkpoint` for observability instead.
 
 ### Scheduled tasks (`routes/console.php` / `Kernel::schedule()`)
 
@@ -540,8 +497,6 @@ Auto-logging covers **failures only** when `OWLOGS_AUTO_SCHEDULE=true`. For task
 ```php
 public function handle(): int
 {
-    Breadcrumb::add(static::class);
-
     $count = Measure::track('billing.daily_run', fn () => $this->run());
 
     Log::info('Daily billing cycle complete', [
@@ -567,7 +522,6 @@ class SendOrderConfirmation
 {
     public function handle(OrderPlaced $event): void
     {
-        Breadcrumb::add(static::class);
         Mail::to($event->order->customer)->send(new OrderConfirmation($event->order));
         Log::info('Order confirmation sent', [
             'order'   => $event->order,
@@ -604,8 +558,6 @@ Always capture the provider's event / idempotency ID — it's how you correlate 
 ```php
 public function handle(StripeEvent $event): Response
 {
-    Breadcrumb::add('StripeWebhook@handle', $event->type);
-
     Log::info('Webhook received', [
         'provider'  => 'stripe',
         'type'      => $event->type,
@@ -699,7 +651,7 @@ Log::info('Invoice export generated', [
 ]);
 ```
 
-- Imports: log a start breadcrumb, then one outcome log with success / failure counts. Never one log per row.
+- Imports: optionally emit `Log::info('import.started', [...])` if the start moment matters, then one outcome log with success / failure counts. Never one log per row.
 - User uploads: log filename + size + sha256, **never** the file contents.
 - Downloads: log only if the file is sensitive (export of personal data, invoice PDF) — not on every static asset.
 
@@ -754,13 +706,12 @@ Once this is in place, every request automatically carries the user info — **y
 
 ### 3. Instrument one workflow at a time
 
-Pattern: **entry breadcrumb → action → outcome log**.
+Pattern: **action → outcome log**. If any intermediate step deserves the timeline, add its own `Log::info('[step.name]', [...])`.
 
 **Controller / Livewire / Action entry:**
 ```php
 public function store(CreateOrderRequest $request): RedirectResponse
 {
-    Breadcrumb::add(static::class.'@store');
     $order = Measure::track('create_order', fn () => $this->createOrder->handle($request->validated()));
     Log::info('Order placed', [
         'order' => $order,
@@ -794,7 +745,6 @@ if ($user->isOnTrial() && $trialExpired) {
 ```php
 public function handle(): void
 {
-    Breadcrumb::add(static::class);
     $report = Measure::track('generate_report', fn () => $this->builder->build($this->periodId));
     Log::info('Monthly report generated', ['period' => $this->periodId, 'rows' => $report->rowCount()]);
 }
@@ -802,7 +752,6 @@ public function handle(): void
 
 **Webhook handler:**
 ```php
-Breadcrumb::add('StripeWebhook@handle', $event->type);
 Log::info('Webhook received', ['provider' => 'stripe', 'type' => $event->type, 'event_id' => $event->id]);
 ```
 
@@ -825,7 +774,7 @@ Try `OWLOGS_MEASURE_DB=true` in staging first to find N+1s.
 
 ### 6. Verify
 
-- Run a representative flow locally; confirm one `trace_id` produces a readable story: entry → breadcrumbs → measures → business logs → outcome.
+- Run a representative flow locally; confirm one `trace_id` produces a readable story: auto-logs (`route.matched`, etc.) → measures → business logs → outcome.
 - Re-read each added `Log::*` — if the message answers only "we reached line X", **delete it**.
 - Confirm no log leaks secrets, tokens, full request bodies, or 3rd-party API responses that may contain keys.
 

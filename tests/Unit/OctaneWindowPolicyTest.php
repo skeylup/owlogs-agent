@@ -5,7 +5,7 @@ declare(strict_types=1);
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Cache;
 use Skeylup\OwlogsAgent\Flushing\OctaneWindowPolicy;
-use Skeylup\OwlogsAgent\Handlers\RemoteHandler;
+use Skeylup\OwlogsAgent\Handlers\RemoteHandlerV3;
 use Skeylup\OwlogsAgent\Jobs\ShipBufferedLogsJob;
 
 beforeEach(function (): void {
@@ -23,7 +23,7 @@ it('does not flush below the batch count and inside the window', function (): vo
     $policy = new OctaneWindowPolicy(function () use (&$now): float {
         return $now;
     });
-    $handler = new RemoteHandler(policy: $policy);
+    $handler = new RemoteHandlerV3(policy: $policy);
 
     // 19 records in 1.999s → window not reached, count not reached.
     for ($i = 0; $i < 19; $i++) {
@@ -40,7 +40,7 @@ it('flushes when the batch count is reached', function (): void {
     $policy = new OctaneWindowPolicy(function () use (&$now): float {
         return $now;
     });
-    $handler = new RemoteHandler(policy: $policy);
+    $handler = new RemoteHandlerV3(policy: $policy);
 
     // 20 records in quick succession — the 20th hits the count threshold.
     for ($i = 0; $i < 20; $i++) {
@@ -57,7 +57,7 @@ it('flushes when the window elapses on the next write', function (): void {
     $policy = new OctaneWindowPolicy(function () use (&$now): float {
         return $now;
     });
-    $handler = new RemoteHandler(policy: $policy);
+    $handler = new RemoteHandlerV3(policy: $policy);
 
     $handler->handle(makeLogRecord('first'));
     $handler->handle(makeLogRecord('second'));
@@ -77,7 +77,7 @@ it('flushes on tick when the window has elapsed', function (): void {
     $policy = new OctaneWindowPolicy(function () use (&$now): float {
         return $now;
     });
-    $handler = new RemoteHandler(policy: $policy);
+    $handler = new RemoteHandlerV3(policy: $policy);
 
     $handler->handle(makeLogRecord('only'));
 
@@ -97,7 +97,7 @@ it('resets the window after a flush so subsequent records start a fresh window',
     $policy = new OctaneWindowPolicy(function () use (&$now): float {
         return $now;
     });
-    $handler = new RemoteHandler(policy: $policy);
+    $handler = new RemoteHandlerV3(policy: $policy);
 
     // Fill to 20 and flush.
     for ($i = 0; $i < 20; $i++) {
@@ -125,7 +125,7 @@ it('onRequestBoundary respects the window and does not force flush', function ()
     $policy = new OctaneWindowPolicy(function () use (&$now): float {
         return $now;
     });
-    $handler = new RemoteHandler(policy: $policy);
+    $handler = new RemoteHandlerV3(policy: $policy);
 
     $handler->handle(makeLogRecord('one'));
 
@@ -142,7 +142,7 @@ it('onRequestBoundary respects the window and does not force flush', function ()
 
 it('onWorkerStopping always force-flushes', function (): void {
     $policy = new OctaneWindowPolicy;
-    $handler = new RemoteHandler(policy: $policy);
+    $handler = new RemoteHandlerV3(policy: $policy);
 
     $handler->handle(makeLogRecord('only'));
 

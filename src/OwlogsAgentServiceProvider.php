@@ -11,11 +11,9 @@ use Illuminate\Console\Events\ScheduledTaskFinished;
 use Illuminate\Console\Events\ScheduledTaskSkipped;
 use Illuminate\Console\Events\ScheduledTaskStarting;
 use Illuminate\Contracts\Http\Kernel;
-use Illuminate\Log\Context\Repository;
 use Illuminate\Queue\Events\JobProcessed;
 use Illuminate\Queue\Events\JobProcessing;
 use Illuminate\Support\Facades\Auth;
-use Illuminate\Support\Facades\Context;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Queue;
@@ -26,11 +24,14 @@ use Laravel\Octane\Events\TaskTerminated;
 use Laravel\Octane\Events\WorkerStarting;
 use Laravel\Octane\Events\WorkerStopping;
 use Livewire\ComponentHookRegistry;
+use Skeylup\OwlogsAgent\Compat\ContextShim;
+use Skeylup\OwlogsAgent\Compat\IdShim;
+use Skeylup\OwlogsAgent\Console\EmitTestLogsCommand;
 use Skeylup\OwlogsAgent\Flushing\EndOfRequestPolicy;
 use Skeylup\OwlogsAgent\Flushing\FlushPolicy;
 use Skeylup\OwlogsAgent\Flushing\OctaneWindowPolicy;
 use Skeylup\OwlogsAgent\Flushing\RuntimeDetector;
-use Skeylup\OwlogsAgent\Handlers\RemoteHandler;
+use Skeylup\OwlogsAgent\Handlers\RemoteHandlerInterface;
 use Skeylup\OwlogsAgent\Handlers\RemoteLogChannel;
 use Skeylup\OwlogsAgent\Livewire\OwlogsLivewireHook;
 use Skeylup\OwlogsAgent\Middleware\AddLogContext;
@@ -115,6 +116,10 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             $this->publishes([
                 __DIR__.'/../config/owlogs.php' => config_path('owlogs.php'),
             ], 'owlogs-agent-config');
+
+            $this->commands([
+                EmitTestLogsCommand::class,
+            ]);
         }
     }
 
@@ -164,7 +169,11 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             return;
         }
 
-        Context::hydrated(function (Repository $context): void {
+        // $context is Illuminate\Log\Context\Repository on Laravel 11+ (the
+        // only Laravel version where ContextShim::hydrated actually invokes
+        // the callback). Untyped here so the class doesn't have to resolve at
+        // parse time on L9/L10 where Repository does not exist.
+        ContextShim::hydrated(function ($context): void {
             $fields = config('owlogs.fields', []);
 
             // Capture the dispatcher's span_id as our parent BEFORE the new
@@ -177,7 +186,7 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             }
 
             if ($fields['span_id'] ?? true) {
-                $context->addHidden('span_id', (string) Str::ulid());
+                $context->addHidden('span_id', IdShim::ulid());
             }
 
             if ($fields['origin'] ?? true) {
@@ -209,25 +218,25 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             // Defensive clear: Laravel hydrates Context from the job payload,
             // but measures/breadcrumbs pushed during a previous job on the
             // same worker can survive if the payload omits those keys.
-            Context::forgetHidden('measures');
-            Context::forgetHidden('breadcrumbs');
+            ContextShim::forgetHidden('measures');
+            ContextShim::forgetHidden('breadcrumbs');
 
             $queueFields = config('owlogs.queue.fields', []);
 
             if ($queueFields['job_class'] ?? true) {
-                Context::addHidden('job_class', $event->job->resolveName());
+                ContextShim::addHidden('job_class', $event->job->resolveName());
             }
 
             if ($queueFields['job_attempt'] ?? true) {
-                Context::addHidden('job_attempt', $event->job->attempts());
+                ContextShim::addHidden('job_attempt', $event->job->attempts());
             }
 
             if ($queueFields['queue_name'] ?? true) {
-                Context::addHidden('queue_name', $event->job->getQueue());
+                ContextShim::addHidden('queue_name', $event->job->getQueue());
             }
 
             if ($queueFields['connection_name'] ?? true) {
-                Context::addHidden('connection_name', $event->connectionName);
+                ContextShim::addHidden('connection_name', $event->connectionName);
             }
 
             $this->addJobProperties($event);
@@ -333,14 +342,17 @@ class OwlogsAgentServiceProvider extends ServiceProvider
      * Resolve the RemoteHandler attached to the `owlogs` channel.
      * Returns null when the channel isn't wired up (e.g. non-http/queue
      * contexts, or the user has replaced the channel definition).
+     *
+     * Uses the marker interface so both the Monolog 2 and Monolog 3 handler
+     * variants (RemoteHandlerV2 / RemoteHandlerV3) are matched.
      */
-    private function resolveRemoteHandler(): ?RemoteHandler
+    private function resolveRemoteHandler(): ?RemoteHandlerInterface
     {
         try {
             $channel = app('log')->channel('owlogs');
             $monolog = $channel->getLogger();
             foreach ($monolog->getHandlers() as $handler) {
-                if ($handler instanceof RemoteHandler) {
+                if ($handler instanceof RemoteHandlerInterface) {
                     return $handler;
                 }
             }
@@ -372,34 +384,34 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             $startTime = hrtime(true);
 
             if ($fields['trace_id'] ?? true) {
-                Context::addHiddenIf('trace_id', (string) Str::ulid());
+                ContextShim::addHiddenIf('trace_id', IdShim::ulid());
             }
 
             if ($fields['span_id'] ?? true) {
-                Context::addHiddenIf('span_id', (string) Str::ulid());
+                ContextShim::addHiddenIf('span_id', IdShim::ulid());
             }
 
             if ($fields['origin'] ?? true) {
-                Context::addHidden('origin', 'cli');
+                ContextShim::addHidden('origin', 'cli');
             }
 
             // App identity — mirrors AddLogContext for CLI so log rows
             // dispatched from artisan (and any queue jobs chained from them)
             // carry app_name / app_env / app_url just like HTTP requests.
             if ($fields['app_name'] ?? true) {
-                Context::addHiddenIf('app_name', (string) config('app.name'));
+                ContextShim::addHiddenIf('app_name', (string) config('app.name'));
             }
             if ($fields['app_env'] ?? true) {
-                Context::addHiddenIf('app_env', (string) config('app.env'));
+                ContextShim::addHiddenIf('app_env', (string) config('app.env'));
             }
             if ($fields['app_url'] ?? true) {
-                Context::addHiddenIf('app_url', (string) config('app.url'));
+                ContextShim::addHiddenIf('app_url', (string) config('app.url'));
             }
 
             if ($fields['git_sha'] ?? true) {
                 $sha = AddLogContext::resolveGitSha();
                 if ($sha !== null) {
-                    Context::addHiddenIf('git_sha', $sha);
+                    ContextShim::addHiddenIf('git_sha', $sha);
                 }
             }
 
@@ -408,19 +420,19 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             if ($fields['user_id'] ?? true) {
                 try {
                     if (Auth::hasUser()) {
-                        Context::addHiddenIf('user_id', Auth::id());
+                        ContextShim::addHiddenIf('user_id', Auth::id());
                     }
                 } catch (\Throwable) {
                     // Auth may not be bootable in every CLI context.
                 }
             }
 
-            Context::addHidden('command_name', $event->command ?? 'unknown');
+            ContextShim::addHidden('command_name', $event->command ?? 'unknown');
 
             if ($event->input) {
                 $args = (string) $event->input;
                 if ($args !== '') {
-                    Context::addHidden('command_args', Str::limit($args, 500));
+                    ContextShim::addHidden('command_args', Str::limit($args, 500));
                 }
             }
         });
@@ -434,9 +446,9 @@ class OwlogsAgentServiceProvider extends ServiceProvider
 
             if ($fields['duration_ms'] ?? true) {
                 $durationMs = (int) round((hrtime(true) - $startTime) / 1_000_000);
-                Context::addHidden('duration_ms', $durationMs);
+                ContextShim::addHidden('duration_ms', $durationMs);
 
-                Context::pushHidden('measures', [
+                ContextShim::pushHidden('measures', [
                     'label' => 'command',
                     'duration_ms' => (float) $durationMs,
                     'meta' => ['command' => $event->command],
@@ -448,7 +460,7 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             $this->onRequestBoundary();
 
             foreach (['measures', 'breadcrumbs'] as $key) {
-                Context::forgetHidden($key);
+                ContextShim::forgetHidden($key);
             }
         });
     }
@@ -473,35 +485,35 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             $startTime = hrtime(true);
 
             if ($fields['trace_id'] ?? true) {
-                Context::addHidden('trace_id', (string) Str::ulid());
+                ContextShim::addHidden('trace_id', IdShim::ulid());
             }
 
             if ($fields['span_id'] ?? true) {
-                Context::addHidden('span_id', (string) Str::ulid());
+                ContextShim::addHidden('span_id', IdShim::ulid());
             }
 
             if ($fields['origin'] ?? true) {
-                Context::addHidden('origin', 'schedule');
+                ContextShim::addHidden('origin', 'schedule');
             }
 
             if ($fields['app_name'] ?? true) {
-                Context::addHiddenIf('app_name', (string) config('app.name'));
+                ContextShim::addHiddenIf('app_name', (string) config('app.name'));
             }
             if ($fields['app_env'] ?? true) {
-                Context::addHiddenIf('app_env', (string) config('app.env'));
+                ContextShim::addHiddenIf('app_env', (string) config('app.env'));
             }
             if ($fields['app_url'] ?? true) {
-                Context::addHiddenIf('app_url', (string) config('app.url'));
+                ContextShim::addHiddenIf('app_url', (string) config('app.url'));
             }
 
             if ($fields['git_sha'] ?? true) {
                 $sha = AddLogContext::resolveGitSha();
                 if ($sha !== null) {
-                    Context::addHiddenIf('git_sha', $sha);
+                    ContextShim::addHiddenIf('git_sha', $sha);
                 }
             }
 
-            Context::addHidden('scheduled_task', $event->task->getSummaryForDisplay());
+            ContextShim::addHidden('scheduled_task', $event->task->getSummaryForDisplay());
         });
 
         $cleanup = function ($event) use (&$startTime): void {
@@ -509,9 +521,9 @@ class OwlogsAgentServiceProvider extends ServiceProvider
 
             if (($fields['duration_ms'] ?? true) && $startTime !== null) {
                 $durationMs = (int) round((hrtime(true) - $startTime) / 1_000_000);
-                Context::addHidden('duration_ms', $durationMs);
+                ContextShim::addHidden('duration_ms', $durationMs);
 
-                Context::pushHidden('measures', [
+                ContextShim::pushHidden('measures', [
                     'label' => 'scheduled_task',
                     'duration_ms' => (float) $durationMs,
                     'meta' => ['task' => $event->task->getSummaryForDisplay()],
@@ -523,7 +535,7 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             $this->onRequestBoundary();
 
             foreach (['trace_id', 'span_id', 'origin', 'scheduled_task', 'duration_ms', 'measures', 'breadcrumbs'] as $key) {
-                Context::forgetHidden($key);
+                ContextShim::forgetHidden($key);
             }
         };
 
@@ -631,7 +643,7 @@ class OwlogsAgentServiceProvider extends ServiceProvider
         }
 
         if ($props !== []) {
-            Context::addHidden('job_props', $props);
+            ContextShim::addHidden('job_props', $props);
         }
     }
 }

@@ -358,6 +358,9 @@ return [
     */
 
     'auto_log' => [
+        // Routing
+        'route_matched' => env('OWLOGS_AUTO_ROUTE_MATCHED', true),
+
         // Jobs / Queue
         'job_dispatched' => env('OWLOGS_AUTO_JOB_DISPATCHED', true),
         'job_started' => env('OWLOGS_AUTO_JOB_STARTED', true),
@@ -381,6 +384,10 @@ return [
         'slow_query' => env('OWLOGS_AUTO_SLOW_QUERY', true),
         'slow_query_ms' => env('OWLOGS_AUTO_SLOW_QUERY_MS', 500),
         'migration' => env('OWLOGS_AUTO_MIGRATION', false),
+        // DB transactions — off by default because transaction-heavy code
+        // (Eloquent saves, batched inserts) produces a lot of low-value noise.
+        // Flip on when debugging silent rollbacks.
+        'db_transaction' => env('OWLOGS_AUTO_DB_TRANSACTION', false),
 
         // Cache
         'cache_miss' => env('OWLOGS_AUTO_CACHE_MISS', false),
@@ -391,6 +398,12 @@ return [
 
         // Scheduler
         'schedule' => env('OWLOGS_AUTO_SCHEDULE', false),
+
+        // Livewire — emit a debug line per component method call. Context
+        // enrichment (livewire_calls array under extra) happens regardless
+        // when livewire/livewire is installed; this toggle adds the
+        // standalone line so the timeline shows the call as a discrete row.
+        'livewire_call' => env('OWLOGS_AUTO_LIVEWIRE_CALL', true),
 
         // Model changes
         'model_changes' => env('OWLOGS_AUTO_MODEL_CHANGES', true),

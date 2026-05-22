@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Laravel **8.65 → 13** support, PHP **8.1+**. Monolog 2/3 compatibility via two `RemoteHandler` variants picked at boot by `RemoteLogChannel`. Cross-version `Context` API wrapped in `Compat\ContextShim` (delegates to Laravel 11+ Context, falls back to a per-process polyfill on L8/L9/L10).
+- `ContextShim` polyfill for older Laravel — same `addHidden / pushHidden / getHidden / allHidden / hydrated` surface, in-process store when Laravel's native facade is missing.
+- `IdShim::ulid()` — `Str::ulid()` on L9+, falls back to `Str::random(26)` on L8.
+- `owlogs:emit-test-logs` artisan command — emits one log of every captured kind, tagged with a shared `test_run_id`, for sandbox / smoke-test scripts.
+- Three new auto-log sources: `OWLOGS_AUTO_ROUTE_MATCHED` (on by default), `OWLOGS_AUTO_DB_TRANSACTION` (off), `OWLOGS_AUTO_LIVEWIRE_CALL` (off).
+
+### Changed
+- **Breadcrumb feature retired.** `Skeylup\OwlogsAgent\Breadcrumb` keeps its public API (`add / all / clear`) but every method is now a **no-op** — existing call sites compile without throwing. Auto-log lines tagged with the shared `trace_id` produce the same chronological narrative without the per-record payload duplication, and they cost less quota (one row per event vs. N decorations attached to every downstream row in the trace). Migration is best done call-site by call-site; until then existing `Breadcrumb::add()` lines silently no-op.
+
+### Removed
+- `breadcrumbs` is no longer populated on outgoing log rows (DB column is preserved for backwards-compat with the server schema). Server-side AI markdown export, MCP tool descriptions, embedding builders, and the workspace trace-detail UI no longer reference breadcrumbs.
+
 ## [1.0.9] - 2026-04-21
 
 ### Changed

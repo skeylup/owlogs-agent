@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Skeylup\OwlogsAgent;
 
-use Illuminate\Support\Facades\Context;
+use Skeylup\OwlogsAgent\Compat\ContextShim;
 
 /**
  * Lightweight performance measurement tool.
@@ -67,7 +67,7 @@ class Measure
             'meta' => array_merge($span['meta'], $extraMeta),
         ];
 
-        Context::pushHidden('measures', $entry);
+        ContextShim::pushHidden('measures', $entry);
 
         return $durationMs;
     }
@@ -101,7 +101,7 @@ class Measure
      */
     public static function checkpoint(string $label, array $meta = []): void
     {
-        Context::pushHidden('measures', [
+        ContextShim::pushHidden('measures', [
             'label' => $label,
             'duration_ms' => 0,
             'meta' => $meta,
@@ -115,7 +115,7 @@ class Measure
      */
     public static function all(): array
     {
-        return Context::getHidden('measures') ?? [];
+        return ContextShim::getHidden('measures') ?? [];
     }
 
     /**
@@ -132,6 +132,6 @@ class Measure
     public static function clear(): void
     {
         static::$pending = [];
-        Context::forgetHidden('measures');
+        ContextShim::forgetHidden('measures');
     }
 }

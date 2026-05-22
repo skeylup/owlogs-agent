@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Skeylup\OwlogsAgent\Flushing;
 
-use Skeylup\OwlogsAgent\Handlers\RemoteHandler;
+use Skeylup\OwlogsAgent\Handlers\RemoteHandlerInterface;
 
 /**
  * Flush policy for short-lived runtimes: PHP-FPM (Herd / Valet / classic),
@@ -17,22 +17,22 @@ use Skeylup\OwlogsAgent\Handlers\RemoteHandler;
  */
 final class EndOfRequestPolicy implements FlushPolicy
 {
-    public function onWrite(RemoteHandler $handler): void
+    public function onWrite(RemoteHandlerInterface $handler): void
     {
         // No-op — the handler's hard ceiling is the only in-flight trigger.
     }
 
-    public function onRequestBoundary(RemoteHandler $handler): void
+    public function onRequestBoundary(RemoteHandlerInterface $handler): void
     {
         $handler->flush(true);
     }
 
-    public function onWorkerStopping(RemoteHandler $handler): void
+    public function onWorkerStopping(RemoteHandlerInterface $handler): void
     {
         $handler->flush(true);
     }
 
-    public function onTick(RemoteHandler $handler): void
+    public function onTick(RemoteHandlerInterface $handler): void
     {
         // No ticks outside Octane/Swoole.
     }

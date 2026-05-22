@@ -5,9 +5,22 @@ declare(strict_types=1);
 namespace Skeylup\OwlogsAgent\Processors;
 
 use Monolog\LogRecord;
-use Monolog\Processor\ProcessorInterface;
 
-class CallerProcessor implements ProcessorInterface
+/**
+ * Resolve the caller (file:line + class@method) of a log record and stash it
+ * under `extra.caller_file` / `caller_line` / `caller_method`.
+ *
+ * Intentionally does not `implements ProcessorInterface` — the interface
+ * exists in both Monolog 2 and Monolog 3 but with incompatible signatures:
+ *
+ *  - Monolog 2: `__invoke(array $record): array`
+ *  - Monolog 3: `__invoke(LogRecord $record): LogRecord`
+ *
+ * Monolog accepts any callable as a processor (not just instances of
+ * ProcessorInterface), so we skip the formal interface and let `__invoke()`
+ * accept either shape, dispatching on `instanceof LogRecord` at runtime.
+ */
+class CallerProcessor
 {
     /** @var list<string> */
     private array $ignorePaths;
@@ -21,11 +34,40 @@ class CallerProcessor implements ProcessorInterface
         $this->ignorePaths = $config['ignore_paths'] ?? ['/vendor/', '/packages/skeylup/owlogs-agent/src/'];
     }
 
-    public function __invoke(LogRecord $record): LogRecord
+    /**
+     * @param  LogRecord|array<string, mixed>  $record
+     * @return LogRecord|array<string, mixed>
+     *
+     * Untyped on purpose — PHP resolves union types at call time and the
+     * `LogRecord` class does not exist on Monolog 2, which would error out
+     * before we ever reach the `instanceof` branch.
+     */
+    public function __invoke(mixed $record): mixed
+    {
+        $extra = $this->resolveExtra();
+        if ($extra === []) {
+            return $record;
+        }
+
+        // Monolog 3 → immutable LogRecord, must rebuild via with()
+        if ($record instanceof LogRecord) {
+            return $record->with(extra: array_merge($record->extra, $extra));
+        }
+
+        // Monolog 2 → record is a plain array, mutate in place
+        $record['extra'] = array_merge($record['extra'] ?? [], $extra);
+
+        return $record;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function resolveExtra(): array
     {
         $trace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, $this->maxFrames);
 
-        foreach ($trace as $frame) {
+        foreach ($trace as $idx => $frame) {
             $file = $frame['file'] ?? null;
 
             if ($file === null) {
@@ -40,14 +82,12 @@ class CallerProcessor implements ProcessorInterface
                 'caller_file' => $this->shortenPath($file),
                 'caller_line' => $frame['line'] ?? null,
             ];
-
-            $idx = array_search($frame, $trace);
             $extra['caller_method'] = $this->resolveCallerMethod($trace, $idx + 1);
 
-            return $record->with(extra: array_merge($record->extra, $extra));
+            return $extra;
         }
 
-        return $record;
+        return [];
     }
 
     /**

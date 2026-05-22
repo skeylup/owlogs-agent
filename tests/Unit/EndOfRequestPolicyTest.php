@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 use Illuminate\Support\Facades\Bus;
 use Skeylup\OwlogsAgent\Flushing\EndOfRequestPolicy;
-use Skeylup\OwlogsAgent\Handlers\RemoteHandler;
+use Skeylup\OwlogsAgent\Handlers\RemoteHandlerV3;
 use Skeylup\OwlogsAgent\Jobs\ShipBufferedLogsJob;
 
 beforeEach(function (): void {
@@ -15,7 +15,7 @@ it('buffers freely below the hard ceiling without dispatching', function (): voi
     config(['owlogs.transport.batch_size' => 50]);
 
     $policy = new EndOfRequestPolicy;
-    $handler = new RemoteHandler(policy: $policy);
+    $handler = new RemoteHandlerV3(policy: $policy);
 
     for ($i = 0; $i < 50; $i++) {
         $handler->handle(makeLogRecord("line {$i}"));
@@ -29,7 +29,7 @@ it('flushes exactly once on onRequestBoundary', function (): void {
     config(['owlogs.transport.batch_size' => 50]);
 
     $policy = new EndOfRequestPolicy;
-    $handler = new RemoteHandler(policy: $policy);
+    $handler = new RemoteHandlerV3(policy: $policy);
 
     for ($i = 0; $i < 10; $i++) {
         $handler->handle(makeLogRecord("line {$i}"));
@@ -47,7 +47,7 @@ it('hard ceiling still fires under non-octane policy', function (): void {
     config(['owlogs.transport.batch_size' => 5]);
 
     $policy = new EndOfRequestPolicy;
-    $handler = new RemoteHandler(policy: $policy);
+    $handler = new RemoteHandlerV3(policy: $policy);
 
     // batch_size=5 → hard ceiling at 5*2=10 records.
     for ($i = 0; $i < 11; $i++) {

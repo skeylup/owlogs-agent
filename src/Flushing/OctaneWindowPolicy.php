@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Skeylup\OwlogsAgent\Flushing;
 
 use Closure;
-use Skeylup\OwlogsAgent\Handlers\RemoteHandler;
+use Skeylup\OwlogsAgent\Handlers\RemoteHandlerInterface;
 
 /**
  * Flush policy for long-lived Octane workers (swoole / roadrunner /
@@ -36,7 +36,7 @@ final class OctaneWindowPolicy implements FlushPolicy
         $this->now = $now ?? static fn (): float => microtime(true);
     }
 
-    public function onWrite(RemoteHandler $handler): void
+    public function onWrite(RemoteHandlerInterface $handler): void
     {
         if ($handler->bufferCount() === 0) {
             return;
@@ -49,23 +49,23 @@ final class OctaneWindowPolicy implements FlushPolicy
         $this->flushIfDue($handler);
     }
 
-    public function onRequestBoundary(RemoteHandler $handler): void
+    public function onRequestBoundary(RemoteHandlerInterface $handler): void
     {
         $this->flushIfDue($handler);
     }
 
-    public function onWorkerStopping(RemoteHandler $handler): void
+    public function onWorkerStopping(RemoteHandlerInterface $handler): void
     {
         $handler->flush(true);
         $this->windowStartedAt = null;
     }
 
-    public function onTick(RemoteHandler $handler): void
+    public function onTick(RemoteHandlerInterface $handler): void
     {
         $this->flushIfDue($handler);
     }
 
-    private function flushIfDue(RemoteHandler $handler): void
+    private function flushIfDue(RemoteHandlerInterface $handler): void
     {
         if ($handler->bufferCount() === 0) {
             $this->windowStartedAt = null;

@@ -2,18 +2,37 @@
 
 Ship Laravel logs — with rich context, tracing IDs, caller location, queue job metadata, and sanitized request body — asynchronously to [**Owlogs**](https://www.owlogs.com).
 
-Drop-in, zero-config, Octane-safe. Works with Laravel 11, 12 and 13.
+Drop-in, zero-config, Octane-safe. Works with Laravel 8.65 through 13.
 
 ---
 
 ## Requirements
 
-- PHP **8.2+**
-- Laravel **11**, **12** or **13**
-- A queue driver (redis, database, sqs, etc.) — **required**: the ship job runs on the queue, no HTTP call blocks a request
-- A persistent cache store (redis, file, database, memcached) — the debounce marker uses `Cache::add`; the `array` driver prevents de-duplication across requests
-- Redis **or** a writable filesystem — for the cross-process log buffer store (see *How it works*)
-- An **Owlogs account** (free sign-up at [owlogs.com](https://www.owlogs.com)) to get a workspace API key
+- **PHP 8.1+** and **Laravel 8.65+**.
+- Full feature parity from Laravel 11. On Laravel 8/9/10, cross-job context
+  propagation (trace_id / breadcrumbs inheriting from the dispatching request)
+  falls back to a per-process polyfill — same-request and single-CLI
+  correlation still work, only the HTTP-request → queued-job hand-off is
+  best-effort.
+- A queue driver (redis, database, sqs, etc.) — **required**: the ship job runs on the queue, no HTTP call blocks a request.
+- A persistent cache store (redis, file, database, memcached) — the debounce marker uses `Cache::add`; the `array` driver prevents de-duplication across requests.
+- Redis **or** a writable filesystem — for the cross-process log buffer store (see *How it works*).
+- An **Owlogs account** (free sign-up at [owlogs.com](https://www.owlogs.com)) to get a workspace API key.
+
+### Tested Laravel × PHP matrix
+
+| Laravel | PHP   | Monolog |
+|---------|-------|---------|
+| 8.65+   | 8.1   | 2.x     |
+| 9.x     | 8.1   | 2.x     |
+| 10.x    | 8.1+  | 3.x     |
+| 11.x    | 8.2+  | 3.x     |
+| 12.x    | 8.2+  | 3.x     |
+| 13.x    | 8.3+  | 3.x     |
+
+> **EOL notice** — Laravel 8 and 9 are upstream EOL (no more security
+> patches). The agent runs on them today; we cannot promise to chase Laravel
+> regressions there.
 
 ---
 
@@ -27,8 +46,7 @@ Drop-in, zero-config, Octane-safe. Works with Laravel 11, 12 and 13.
 - **Sanitized request input**: POST / PUT / PATCH bodies are captured with `password`, `secret`, `token`, `authorization`, `cookie`, `credit_card` values redacted.
 - **Exception stacktraces** including up to 3 levels of chained exceptions.
 - **Performance spans** via the `Measure` helper and optional automatic DB query tracking with N+1 detection.
-- **Breadcrumbs** for action timelines.
-- **Opt-in lifecycle auto-logging** for auth events, job lifecycle, mail, cache, slow queries, scheduled tasks, model changes, and more.
+- **Opt-in lifecycle auto-logging** for route matched, auth events, job lifecycle, mail, cache, slow queries, scheduled tasks, model changes, DB transactions, Livewire calls, and more. Replaces the old breadcrumb pattern: each captured event becomes a standalone log line tagged with the shared `trace_id` — the timeline correlates the same way without the per-row payload overhead.
 - **Async delivery** via a debounced queue job: N flushes (HTTP request + queue jobs it dispatches) in the same window collapse to a single `ShipBufferedLogsJob` — no cascade, no blocking.
 - **Runtime-aware buffering**: non-Octane accumulates in RAM and flushes once per request/job/command boundary; Octane batches across requests with a 2 s / 20-log window so workers ship fewer, bigger payloads.
 - **Octane-safe**: no container / request injection into singletons, all state is reset between requests.
@@ -188,17 +206,17 @@ Every query is recorded as a `db` span, and when the same normalized SQL runs mo
 
 ---
 
-## Breadcrumbs
+## Breadcrumbs *(deprecated)*
+
+The `Skeylup\OwlogsAgent\Breadcrumb` helper still ships but every method is a **no-op** — existing call sites keep compiling without throwing. The feature is retired in favour of richer **auto-logs** (see next section): each framework event becomes a standalone log line tagged with the shared `trace_id`. Filter by `trace_id` in the Owlogs UI to get the chronological narrative the old breadcrumb chain used to produce, without the per-record payload duplication and the extra quota cost.
+
+For custom business steps that no framework event captures, emit a regular log line:
 
 ```php
-use Skeylup\OwlogsAgent\Breadcrumb;
-
-Breadcrumb::add('CreateProjectAction::execute');
-Breadcrumb::add('ValidateBilling', 'plan=pro');
-Breadcrumb::add('NotifyTeam');
+Log::info('[checkout.kyc_step_3_passed]', ['user_id' => $user->id]);
 ```
 
-Breadcrumbs are persisted as a `breadcrumbs` JSON array on every log entry of the request/job — so when something fails, you know exactly what led to it.
+Same trace correlation, less ceremony.
 
 ---
 
@@ -208,6 +226,7 @@ Most lifecycle events are captured automatically out of the box. Flip any switch
 
 | Env var | Default | Event |
 |---|---|---|
+| `OWLOGS_AUTO_ROUTE_MATCHED`   | `true`  | Router resolves the route — first line of every HTTP trace |
 | `OWLOGS_AUTO_JOB_DISPATCHED`  | `true`  | A job is queued |
 | `OWLOGS_AUTO_JOB_STARTED`     | `true`  | A worker picks up a job |
 | `OWLOGS_AUTO_JOB_COMPLETED`   | `true`  | A job completes successfully |
@@ -224,9 +243,11 @@ Most lifecycle events are captured automatically out of the box. Flip any switch
 | `OWLOGS_AUTO_SLOW_QUERY`      | `true`  | Queries slower than the threshold below |
 | `OWLOGS_AUTO_SLOW_QUERY_MS`   | `500`   | Slow-query threshold in ms |
 | `OWLOGS_AUTO_MIGRATION`       | `false` | Migration ran (opt-in — noisy on deploys) |
+| `OWLOGS_AUTO_DB_TRANSACTION`  | `false` | DB transaction committed / rolled back (opt-in — useful to debug silent rollbacks) |
 | `OWLOGS_AUTO_CACHE_HIT` / `OWLOGS_AUTO_CACHE_MISS` | `false` | Cache events (opt-in — very high volume) |
 | `OWLOGS_AUTO_HTTP_CLIENT`     | `true`  | Outgoing HTTP client errors (>= 4xx) |
 | `OWLOGS_AUTO_SCHEDULE`        | `false` | Scheduled task failed (opt-in) |
+| `OWLOGS_AUTO_LIVEWIRE_CALL`   | `true`  | Livewire `Component::method` calls as standalone timeline rows (no-op when livewire/livewire is not installed; context enrichment also runs regardless) |
 | `OWLOGS_AUTO_MODEL_CHANGES`   | `true`  | Eloquent created / updated / deleted (scoped via `model_changes_models`) |
 | `OWLOGS_AUTO_EVENT_DISPATCH`  | `true`  | App-level events (excluding framework internals) |
 

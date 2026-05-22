@@ -6,8 +6,9 @@ namespace Skeylup\OwlogsAgent\Middleware;
 
 use Closure;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Context;
 use Illuminate\Support\Str;
+use Skeylup\OwlogsAgent\Compat\ContextShim;
+use Skeylup\OwlogsAgent\Compat\IdShim;
 use Skeylup\OwlogsAgent\Contracts\HasLogContext;
 use Skeylup\OwlogsAgent\Handlers\RemoteHandler;
 use Symfony\Component\HttpFoundation\Response;
@@ -38,8 +39,8 @@ class AddLogContext
         // Defensive clear: Laravel flushes Context between Octane requests via
         // ContextServiceProvider, but any path that bypasses that reset would
         // leak measures/breadcrumbs from the previous request into this one.
-        Context::forgetHidden('measures');
-        Context::forgetHidden('breadcrumbs');
+        ContextShim::forgetHidden('measures');
+        ContextShim::forgetHidden('breadcrumbs');
 
         // Tracing IDs — span_id is the per-execution identity; trace_id is
         // the cross-execution correlation. Keeping them distinct lets the
@@ -47,61 +48,61 @@ class AddLogContext
         // the job inherits the HTTP span_id as its parent_span_id via the
         // queue payload (see OwlogsAgentServiceProvider::registerQueueContext).
         if ($fields['trace_id'] ?? true) {
-            Context::addHidden('trace_id', (string) Str::ulid());
+            ContextShim::addHidden('trace_id', IdShim::ulid());
         }
 
         if ($fields['span_id'] ?? true) {
-            Context::addHidden('span_id', (string) Str::ulid());
+            ContextShim::addHidden('span_id', IdShim::ulid());
         }
 
         if ($fields['origin'] ?? true) {
-            Context::addHidden('origin', 'http');
+            ContextShim::addHidden('origin', 'http');
         }
 
         // App info
         if ($fields['app_name'] ?? true) {
-            Context::addHidden('app_name', (string) config('app.name'));
+            ContextShim::addHidden('app_name', (string) config('app.name'));
         }
 
         if ($fields['app_env'] ?? true) {
-            Context::addHidden('app_env', (string) config('app.env'));
+            ContextShim::addHidden('app_env', (string) config('app.env'));
         }
 
         if ($fields['app_url'] ?? true) {
-            Context::addHidden('app_url', (string) config('app.url'));
+            ContextShim::addHidden('app_url', (string) config('app.url'));
         }
 
         // Request info
         if ($fields['uri'] ?? true) {
-            Context::addHidden('uri', $request->method().' '.$request->fullUrl());
+            ContextShim::addHidden('uri', $request->method().' '.$request->fullUrl());
         }
 
         // Dedicated method column — lets the server filter by HTTP verb without
         // splitting `uri` (which gets rewritten by url_resolver for Livewire).
         if ($fields['http_method'] ?? true) {
-            Context::addHidden('http_method', $request->method());
+            ContextShim::addHidden('http_method', $request->method());
         }
 
         if ($fields['ip'] ?? true) {
-            Context::addHidden('ip', $request->ip());
+            ContextShim::addHidden('ip', $request->ip());
         }
 
         if ($fields['user_agent'] ?? true) {
-            Context::addHidden('user_agent', Str::limit((string) $request->userAgent(), 200, ''));
+            ContextShim::addHidden('user_agent', Str::limit((string) $request->userAgent(), 200, ''));
         }
 
         // Attempt early resolution — may be null if auth hasn't run yet.
         if ($fields['user_id'] ?? true) {
             $userId = $request->user()?->getKey();
             if ($userId !== null) {
-                Context::addHidden('user_id', $userId);
+                ContextShim::addHidden('user_id', $userId);
             }
         }
 
         if ($fields['git_sha'] ?? true) {
             $gitSha = self::resolveGitSha();
             if ($gitSha !== null) {
-                Context::addHidden('git_sha', $gitSha);
+                ContextShim::addHidden('git_sha', $gitSha);
             }
         }
 
@@ -109,14 +110,14 @@ class AddLogContext
         if ($fields['route_name'] ?? true) {
             $routeName = $request->route()?->getName();
             if ($routeName !== null) {
-                Context::addHidden('route_name', $routeName);
+                ContextShim::addHidden('route_name', $routeName);
             }
         }
 
         if ($fields['route_action'] ?? true) {
             $action = $request->route()?->getActionName();
             if ($action !== null && $action !== 'Closure') {
-                Context::addHidden('route_action', $action);
+                ContextShim::addHidden('route_action', $action);
             }
         }
 
@@ -131,17 +132,17 @@ class AddLogContext
         $response = $next($request);
 
         // Route info — re-resolve after $next()
-        if (($fields['route_name'] ?? true) && ! Context::hasHidden('route_name')) {
+        if (($fields['route_name'] ?? true) && ! ContextShim::hasHidden('route_name')) {
             $routeName = $request->route()?->getName();
             if ($routeName !== null) {
-                Context::addHidden('route_name', $routeName);
+                ContextShim::addHidden('route_name', $routeName);
             }
         }
 
-        if (($fields['route_action'] ?? true) && ! Context::hasHidden('route_action')) {
+        if (($fields['route_action'] ?? true) && ! ContextShim::hasHidden('route_action')) {
             $action = $request->route()?->getActionName();
             if ($action !== null && $action !== 'Closure') {
-                Context::addHidden('route_action', $action);
+                ContextShim::addHidden('route_action', $action);
             }
         }
 
@@ -151,21 +152,21 @@ class AddLogContext
         if ($fields['user_id'] ?? true) {
             $userId = $user?->getKey();
             if ($userId !== null) {
-                Context::addHidden('user_id', $userId);
+                ContextShim::addHidden('user_id', $userId);
             }
         }
 
         if ($user instanceof HasLogContext) {
-            Context::addHidden('user_context', $user->toLogContext());
-            Context::addHidden('user_label', $user->getLogContextLabel());
+            ContextShim::addHidden('user_context', $user->toLogContext());
+            ContextShim::addHidden('user_label', $user->getLogContextLabel());
         }
 
         // Duration
         if ($fields['duration_ms'] ?? true) {
             $durationMs = (int) round((hrtime(true) - $startTime) / 1_000_000);
-            Context::addHidden('duration_ms', $durationMs);
+            ContextShim::addHidden('duration_ms', $durationMs);
 
-            Context::pushHidden('measures', [
+            ContextShim::pushHidden('measures', [
                 'label' => 'request',
                 'duration_ms' => (float) $durationMs,
                 'meta' => [],
@@ -174,7 +175,7 @@ class AddLogContext
 
         // Response header for traceability
         if ($fields['trace_id'] ?? true) {
-            $response->headers->set('X-Trace-Id', Context::getHidden('trace_id'));
+            $response->headers->set('X-Trace-Id', ContextShim::getHidden('trace_id'));
         }
 
         return $response;
@@ -247,7 +248,7 @@ class AddLogContext
             $json = mb_substr($json, 0, 4096);
         }
 
-        Context::addHidden('request_input', $json);
+        ContextShim::addHidden('request_input', $json);
     }
 
     /**

@@ -4,9 +4,9 @@ declare(strict_types=1);
 
 namespace Skeylup\OwlogsAgent;
 
-use Illuminate\Support\Facades\Context;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use Skeylup\OwlogsAgent\Compat\ContextShim;
 
 /**
  * Tracks SQL queries during a request/job with caller resolution and N+1 detection.
@@ -65,7 +65,7 @@ class QueryTracker
         }
         $normalizedSql = $this->normalizeSql($query->sql);
 
-        Context::pushHidden('measures', [
+        ContextShim::pushHidden('measures', [
             'label' => 'db',
             'duration_ms' => round($query->time, 2),
             'meta' => [
@@ -85,10 +85,10 @@ class QueryTracker
                 'count' => $this->queryCounts[$normalizedSql],
                 'caller' => $caller,
                 'connection' => $query->connectionName,
-                'trace_id' => Context::getHidden('trace_id'),
+                'trace_id' => ContextShim::getHidden('trace_id'),
             ];
 
-            Context::pushHidden('measures', [
+            ContextShim::pushHidden('measures', [
                 'label' => 'n+1',
                 'duration_ms' => 0,
                 'meta' => $pattern,

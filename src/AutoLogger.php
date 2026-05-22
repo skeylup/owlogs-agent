@@ -15,6 +15,8 @@ use Illuminate\Console\Events\ScheduledTaskFailed;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Events\MigrationEnded;
 use Illuminate\Database\Events\QueryExecuted;
+use Illuminate\Database\Events\TransactionCommitted;
+use Illuminate\Database\Events\TransactionRolledBack;
 use Illuminate\Http\Client\Events\ConnectionFailed;
 use Illuminate\Http\Client\Events\ResponseReceived;
 use Illuminate\Mail\Events\MessageSending;
@@ -27,6 +29,7 @@ use Illuminate\Queue\Events\JobProcessed;
 use Illuminate\Queue\Events\JobProcessing;
 use Illuminate\Queue\Events\JobQueued;
 use Illuminate\Queue\Events\JobRetryRequested;
+use Illuminate\Routing\Events\RouteMatched;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
@@ -60,6 +63,7 @@ class AutoLogger
             return;
         }
 
+        $this->registerRouteListeners($config);
         $this->registerJobListeners($config);
         $this->registerAuthListeners($config);
         $this->registerMailListeners($config);
@@ -70,6 +74,35 @@ class AutoLogger
         $this->registerSchedulerListeners($config);
         $this->registerModelListeners($config);
         $this->registerEventDispatchListener($config);
+    }
+
+    // ── Routing ──────────────────────────────────────────────────────────
+
+    private function registerRouteListeners(array $config): void
+    {
+        if (! ($config['route_matched'] ?? false)) {
+            return;
+        }
+
+        Event::listen(RouteMatched::class, function (RouteMatched $event): void {
+            $route = $event->route;
+            $request = $event->request;
+
+            $action = $route->getActionName();
+            // Skip closures (anonymous routes) and the agent's own sandbox-stats —
+            // they don't carry useful semantics in the trace timeline.
+            if ($action === 'Closure') {
+                return;
+            }
+
+            Log::channel('owlogs')?->debug('route.matched: '.$request->method().' '.$request->path().' → '.class_basename($action), [
+                'method' => $request->method(),
+                'path' => $request->path(),
+                'name' => $route->getName(),
+                'action' => $action,
+                'middleware' => $route->gatherMiddleware(),
+            ]);
+        });
     }
 
     // ── Jobs ─────────────────────────────────────────────────────────────
@@ -324,6 +357,24 @@ class AutoLogger
                 Log::channel('owlogs')?->info('db.migration: '.class_basename($event->migration).' ('.$event->method.')', [
                     'migration' => get_class($event->migration),
                     'direction' => $event->method,
+                ]);
+            });
+        }
+
+        if ($config['db_transaction'] ?? false) {
+            Event::listen(TransactionCommitted::class, function (TransactionCommitted $event): void {
+                Log::channel('owlogs')?->debug('db.transaction.committed', [
+                    'connection' => $event->connectionName,
+                ]);
+            });
+
+            Event::listen(TransactionRolledBack::class, function (TransactionRolledBack $event): void {
+                // Surfaced as a notice — silent rollbacks are exactly what
+                // observability is supposed to catch, but they're also
+                // normal control flow in retry / advisory-lock code, so
+                // we don't escalate to a warning.
+                Log::channel('owlogs')?->notice('db.transaction.rolled_back', [
+                    'connection' => $event->connectionName,
                 ]);
             });
         }
