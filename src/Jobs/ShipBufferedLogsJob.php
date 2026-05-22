@@ -17,6 +17,17 @@ use Skeylup\OwlogsAgent\Transport\LogBufferStore;
 use Throwable;
 
 /**
+ * Internal signal raised by {@see ShipBufferedLogsJob::sendChunk()} when a
+ * transient failure occurred but we have retries left. Caught at the
+ * boundary of {@see ShipBufferedLogsJob::handle()} so the current handle()
+ * call returns cleanly after `$this->release($delay)` has been issued,
+ * without surfacing as a fatal exception in Horizon / the queue worker
+ * log. Only the final attempt re-throws the original exception so
+ * Laravel's `failed()` hook fires.
+ */
+final class ShipBufferedLogsRetrying extends \RuntimeException {}
+
+/**
  * Drains up to `transport.ship.batch_count` log rows from the
  * LogBufferStore, ships them to the Owlogs ingest endpoint, and
  * self-re-dispatches (without delay) while there is still pending data.
@@ -64,6 +75,19 @@ class ShipBufferedLogsJob implements ShouldQueue
         // during our work must be allowed to re-arm the next ship.
         Cache::forget(self::PENDING_CACHE_KEY);
 
+        try {
+            $this->runShip($store);
+        } catch (ShipBufferedLogsRetrying) {
+            // Transient failure on a non-final attempt: $this->release()
+            // already queued a retry with the right backoff and the
+            // failure has been logged as a warning. Returning cleanly
+            // here keeps the queue worker quiet — only the final attempt
+            // surfaces as a job failure (failed() hook + Horizon entry).
+        }
+    }
+
+    private function runShip(LogBufferStore $store): void
+    {
         // No work emitted from within this job may reach the owlogs
         // channel: any Log::* here would buffer → spawn another ship
         // job → loop.
@@ -273,8 +297,47 @@ class ShipBufferedLogsJob implements ShouldQueue
 
             throw new \RuntimeException("Owlogs ingestion failed with status {$status}");
         } catch (Throwable $e) {
+            $this->handleTransientFailure($e);
+        }
+    }
+
+    /**
+     * Handle a transient HTTP failure (network blip, DNS resolution failure,
+     * 5xx response). On any attempt that is NOT the final one we silently
+     * release the job back to the queue with the configured backoff and emit
+     * a single warning line — so the queue worker / Horizon doesn't surface
+     * an "exception" for every retry. Only when we've burned through
+     * `$tries` does the original exception bubble up so Laravel marks the
+     * job as failed and invokes {@see self::failed()}.
+     */
+    private function handleTransientFailure(Throwable $e): void
+    {
+        if ($this->attempts() >= $this->tries) {
+            // Last attempt — let it propagate so failed() fires.
             throw $e;
         }
+
+        $delay = $this->backoff[$this->attempts() - 1] ?? 60;
+
+        try {
+            logger()->channel('single')->warning(
+                sprintf(
+                    'Owlogs ShipBufferedLogsJob attempt %d/%d failed, retrying in %ds',
+                    $this->attempts(),
+                    $this->tries,
+                    $delay,
+                ),
+                ['error' => $e->getMessage()],
+            );
+        } catch (Throwable) {
+            // best-effort
+        }
+
+        $this->release($delay);
+
+        // Signal the outer handle() to return cleanly without surfacing
+        // the original exception as a worker-level failure.
+        throw new ShipBufferedLogsRetrying;
     }
 
     /**
