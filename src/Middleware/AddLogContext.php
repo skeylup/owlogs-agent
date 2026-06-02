@@ -5,13 +5,19 @@ declare(strict_types=1);
 namespace Skeylup\OwlogsAgent\Middleware;
 
 use Closure;
+use Illuminate\Auth\Access\AuthorizationException;
+use Illuminate\Auth\AuthenticationException;
 use Illuminate\Http\Request;
+use Illuminate\Session\TokenMismatchException;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 use Skeylup\OwlogsAgent\Compat\ContextShim;
 use Skeylup\OwlogsAgent\Compat\IdShim;
 use Skeylup\OwlogsAgent\Contracts\HasLogContext;
 use Skeylup\OwlogsAgent\Handlers\RemoteHandler;
 use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 
 class AddLogContext
 {
@@ -129,7 +135,19 @@ class AddLogContext
             $this->captureRequestInput($request);
         }
 
-        $response = $next($request);
+        // Defensive try/catch: in production Illuminate\Routing\Pipeline already
+        // converts pipeline exceptions into rendered responses (and tags them
+        // via Response::withException), so this catch only fires when an
+        // exception escapes the pipeline (handler unbound) or when the middleware
+        // is invoked directly outside a pipeline (tests). Either way we surface
+        // the rejection then re-throw so Laravel's handling is unchanged.
+        try {
+            $response = $next($request);
+        } catch (\Throwable $e) {
+            $this->logRejection($request, $e, $this->statusForException($e));
+
+            throw $e;
+        }
 
         // Route info — re-resolve after $next()
         if (($fields['route_name'] ?? true) && ! ContextShim::hasHidden('route_name')) {
@@ -178,7 +196,115 @@ class AddLogContext
             $response->headers->set('X-Trace-Id', ContextShim::getHidden('trace_id'));
         }
 
+        $this->logFailedResponse($request, $response);
+
         return $response;
+    }
+
+    /**
+     * Log a non-success response so it surfaces in Owlogs.
+     *
+     * Distinguishes a framework rejection (a thrown exception the routing
+     * pipeline rendered into a response, tagged via Response::withException)
+     * from a status the application deliberately returned.
+     */
+    private function logFailedResponse(Request $request, Response $response): void
+    {
+        $status = $response->getStatusCode();
+        $exception = $this->responseException($response);
+
+        // Response rendered from a thrown exception (auth / throttle / abort /
+        // validation). Server errors (5xx) are already report()-ed by Laravel
+        // and captured via the log stack, so we leave them out here.
+        if ($exception !== null) {
+            if ($status < 500) {
+                $this->logRejection($request, $exception, $status);
+            }
+
+            return;
+        }
+
+        // Non-2xx status returned directly by the application.
+        $config = config('owlogs.auto_log', []);
+
+        if (! ($config['http_response'] ?? true)) {
+            return;
+        }
+
+        if ($status < (int) ($config['http_response_min_status'] ?? 400)) {
+            return;
+        }
+
+        Log::channel('owlogs')?->{$this->levelForStatus($status)}(
+            'http.response: '.$status.' '.$request->method().' '.$request->path(),
+            ['status' => $status, 'method' => $request->method(), 'path' => $request->path()],
+        );
+    }
+
+    /**
+     * Log a request rejected by the middleware/pipeline (e.g. auth, throttle,
+     * authorization, CSRF, validation). Skips 5xx — those are server errors
+     * Laravel reports through its own exception channel.
+     */
+    private function logRejection(Request $request, \Throwable $exception, int $status): void
+    {
+        if (! (config('owlogs.auto_log.middleware_rejection') ?? true)) {
+            return;
+        }
+
+        if ($status >= 500) {
+            return;
+        }
+
+        Log::channel('owlogs')?->{$this->levelForStatus($status)}(
+            'http.rejected: '.$status.' '.$request->method().' '.$request->path().' — '.class_basename($exception),
+            [
+                'status' => $status,
+                'method' => $request->method(),
+                'path' => $request->path(),
+                'exception_class' => get_class($exception),
+                'exception_file' => $exception->getFile().':'.$exception->getLine(),
+            ],
+        );
+    }
+
+    /**
+     * The exception the routing pipeline attached to a rendered error response,
+     * or null when the response was produced without an exception.
+     */
+    private function responseException(Response $response): ?\Throwable
+    {
+        return (isset($response->exception) && $response->exception instanceof \Throwable)
+            ? $response->exception
+            : null;
+    }
+
+    /**
+     * Resolve the HTTP status an exception maps to, mirroring Laravel's handler.
+     */
+    private function statusForException(\Throwable $e): int
+    {
+        return match (true) {
+            $e instanceof HttpExceptionInterface => $e->getStatusCode(),
+            $e instanceof ValidationException => $e->status,
+            $e instanceof AuthenticationException => 401,
+            $e instanceof AuthorizationException => $e->status() ?? 403,
+            $e instanceof TokenMismatchException => 419,
+            default => 500,
+        };
+    }
+
+    /**
+     * Map an HTTP status to a PSR log level.
+     */
+    private function levelForStatus(int $status): string
+    {
+        return match (true) {
+            $status >= 500 => 'error',
+            $status >= 400 => 'warning',
+            $status >= 300 => 'notice',
+            default => 'info',
+        };
     }
 
     private function isIgnored(Request $request): bool

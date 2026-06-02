@@ -396,6 +396,20 @@ return [
         // HTTP Client (outgoing)
         'http_client' => env('OWLOGS_AUTO_HTTP_CLIENT', true),
 
+        // HTTP responses (incoming) — log responses the host app returns whose
+        // status is >= http_response_min_status. Complements `http_client`,
+        // which logs OUTGOING calls. Default min status 400 logs client/server
+        // errors only; 3xx redirects are normal flow and stay out. Lower to 300
+        // to also capture redirects.
+        'http_response' => env('OWLOGS_AUTO_HTTP_RESPONSE', true),
+        'http_response_min_status' => env('OWLOGS_AUTO_HTTP_RESPONSE_MIN_STATUS', 400),
+
+        // Middleware / pipeline rejections — log framework-level refusals
+        // (auth 401, authorization 403, validation 422, CSRF 419, abort()) that
+        // Laravel keeps in `internalDontReport`, so they never reach the log
+        // stack. Server errors (5xx) are left to Laravel's own exception report.
+        'middleware_rejection' => env('OWLOGS_AUTO_MIDDLEWARE_REJECTION', true),
+
         // Scheduler
         'schedule' => env('OWLOGS_AUTO_SCHEDULE', false),
 
