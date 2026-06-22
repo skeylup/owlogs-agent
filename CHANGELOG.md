@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Telescope's `ProcessPendingUpdates` (and any `Laravel\Telescope\` job) is now treated as an internal job and never auto-logged. It was dispatched during the agent's own `ShipBufferedLogsJob` terminating phase — after `handle()`'s suppression window had closed — which tagged that span with `job_class=ShipBufferedLogsJob` and mislabelled the whole parent trace (e.g. a scheduled `artisan` command appeared as `ShipBufferedLogsJob`). Apps running Telescope alongside the agent now keep correctly-titled traces.
+
 ### Added
+- `owlogs.ignored_jobs` config — class-name prefixes whose job lifecycle auto-logs are dropped, extending the built-in internal-job set (`Skeylup\OwlogsAgent\`, `Illuminate\Queue\`, `Laravel\Telescope\`, ...) for third-party infrastructure jobs without patching the package.
 - Laravel **8.65 → 13** support, PHP **8.1+**. Monolog 2/3 compatibility via two `RemoteHandler` variants picked at boot by `RemoteLogChannel`. Cross-version `Context` API wrapped in `Compat\ContextShim` (delegates to Laravel 11+ Context, falls back to a per-process polyfill on L8/L9/L10).
 - `ContextShim` polyfill for older Laravel — same `addHidden / pushHidden / getHidden / allHidden / hydrated` surface, in-process store when Laravel's native facade is missing.
 - `IdShim::ulid()` — `Str::ulid()` on L9+, falls back to `Str::random(26)` on L8.

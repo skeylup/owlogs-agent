@@ -353,6 +353,32 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Ignored Jobs
+    |--------------------------------------------------------------------------
+    |
+    | Class-name prefixes whose job lifecycle auto-logs (`job.dispatched`,
+    | `job.started`, `job.completed`, `job.failed`, `job.retrying`) must never
+    | be forwarded to Owlogs. Matched with `str_starts_with`, so a trailing
+    | namespace separator silences a whole package.
+    |
+    | The agent already treats its own jobs and the framework queue plumbing
+    | (Illuminate\Queue\, Illuminate\Events\, Laravel\Scout\, Laravel\Telescope\,
+    | ...) as internal; this list lets you extend that set for third-party
+    | infrastructure jobs that would otherwise pollute business traces.
+    |
+    | Example:
+    |
+    |   'ignored_jobs' => [
+    |       'Spatie\\Backup\\',
+    |       'App\\Jobs\\Internal\\',
+    |   ],
+    |
+    */
+
+    'ignored_jobs' => [],
+
+    /*
+    |--------------------------------------------------------------------------
     | Auto-Logging
     |--------------------------------------------------------------------------
     */

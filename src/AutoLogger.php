@@ -661,10 +661,24 @@ class AutoLogger
             'Illuminate\\Broadcasting\\',
             'Illuminate\\Events\\',
             'Laravel\\Scout\\',
+            // Telescope dispatches ProcessPendingUpdates at every request/job
+            // terminating boundary — pure observability plumbing with no
+            // business meaning. Left unfiltered, the dispatch that fires during
+            // the agent's own ShipBufferedLogsJob terminating phase (after
+            // handle()'s suppression window has closed) tags that span with
+            // job_class=ShipBufferedLogsJob and mislabels the whole parent
+            // trace. Treat it as internal, exactly like the framework queue
+            // plumbing above.
+            'Laravel\\Telescope\\',
         ];
 
+        $configured = config('owlogs.ignored_jobs', []);
+        if (is_array($configured)) {
+            $internals = array_merge($internals, $configured);
+        }
+
         foreach ($internals as $prefix) {
-            if (str_starts_with($jobClass, $prefix)) {
+            if (is_string($prefix) && $prefix !== '' && str_starts_with($jobClass, $prefix)) {
                 return true;
             }
         }
