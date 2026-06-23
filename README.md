@@ -46,7 +46,7 @@ Drop-in, zero-config, Octane-safe. Works with Laravel 8.65 through 13.
 - **Sanitized request input**: POST / PUT / PATCH bodies are captured with `password`, `secret`, `token`, `authorization`, `cookie`, `credit_card` values redacted.
 - **Exception stacktraces** including up to 3 levels of chained exceptions.
 - **Performance spans** via the `Measure` helper and optional automatic DB query tracking with N+1 detection.
-- **Opt-in lifecycle auto-logging** for route matched, auth events, job lifecycle, mail, cache, slow queries, scheduled tasks, model changes, DB transactions, Livewire calls, and more. Replaces the old breadcrumb pattern: each captured event becomes a standalone log line tagged with the shared `trace_id` — the timeline correlates the same way without the per-row payload overhead.
+- **Opt-in lifecycle auto-logging** for route matched, auth events, job lifecycle, mail, cache, slow queries, scheduled tasks, model changes, DB transactions, Livewire calls, GraphQL operations, and more. Replaces the old breadcrumb pattern: each captured event becomes a standalone log line tagged with the shared `trace_id` — the timeline correlates the same way without the per-row payload overhead.
 - **Async delivery** via a debounced queue job: N flushes (HTTP request + queue jobs it dispatches) in the same window collapse to a single `ShipBufferedLogsJob` — no cascade, no blocking.
 - **Runtime-aware buffering**: non-Octane accumulates in RAM and flushes once per request/job/command boundary; Octane batches across requests with a 2 s / 20-log window so workers ship fewer, bigger payloads.
 - **Octane-safe**: no container / request injection into singletons, all state is reset between requests.
@@ -248,6 +248,7 @@ Most lifecycle events are captured automatically out of the box. Flip any switch
 | `OWLOGS_AUTO_HTTP_CLIENT`     | `true`  | Outgoing HTTP client errors (>= 4xx) |
 | `OWLOGS_AUTO_SCHEDULE`        | `false` | Scheduled task failed (opt-in) |
 | `OWLOGS_AUTO_LIVEWIRE_CALL`   | `true`  | Livewire `Component::method` calls as standalone timeline rows (no-op when livewire/livewire is not installed; context enrichment also runs regardless) |
+| `OWLOGS_AUTO_GRAPHQL_OPERATION` | `true` | Lighthouse GraphQL operations as standalone timeline rows (no-op when nuwave/lighthouse is not installed; context enrichment also runs regardless) |
 | `OWLOGS_AUTO_MODEL_CHANGES`   | `true`  | Eloquent created / updated / deleted (scoped via `model_changes_models`) |
 | `OWLOGS_AUTO_EVENT_DISPATCH`  | `true`  | App-level events (excluding framework internals) |
 
@@ -265,6 +266,18 @@ All of the following can be overridden in `config/owlogs.php` after publishing.
 | `OWLOGS_API_KEY` | — | Workspace API key (sent as `X-Api-Key`) |
 | `OWLOGS_AUTO_REGISTER_STACK` | `true` | Auto-define the `owlogs` channel and append it to `stack` on boot |
 | `OWLOGS_JSON` | `true` | Use JsonFormatter (vs. LineFormatter) |
+
+### Integrations (Livewire / GraphQL)
+
+These rewrite the opaque single-endpoint URIs of Livewire and Lighthouse so the
+Owlogs UI groups traces by the actual operation. Each is a no-op when its
+package is absent.
+
+| Env var | Default | Description |
+|---|---|---|
+| `OWLOGS_LIVEWIRE_HOOK` | `true` | Rewrite `/livewire/update` as `POST /livewire — Component::method` (no-op without livewire/livewire) |
+| `OWLOGS_GRAPHQL_HOOK` | `true` | Rewrite `/graphql` as `POST /graphql — mutation createReport` and stash the operation breakdown under `extra.graphql_operations` (no-op without nuwave/lighthouse) |
+| `OWLOGS_GRAPHQL_IGNORE_INTROSPECTION` | `true` | Skip introspection queries (`__schema` / `__type`) — IDE schema fetches, pure noise |
 
 ### Transport (HTTP POST to Owlogs)
 

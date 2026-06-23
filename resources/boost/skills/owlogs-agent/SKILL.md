@@ -373,6 +373,42 @@ Livewire validation surfaces inline errors — the user sees them. Usually no lo
 
 `wire:poll` re-fires `render()` on a timer. Anything inside `render()` or computed properties will spam. If the polled action triggers a real side-effect refresh, gate it: only log when state actually changed (`$this->order->wasChanged()`).
 
+### GraphQL operations (Lighthouse)
+
+Lighthouse routes **every** GraphQL operation through one endpoint (`POST /graphql`). Like Livewire, the auto-captured route / URL tells you nothing about what ran — `createReport` and `deleteUser` look identical. The agent compensates automatically: when `nuwave/lighthouse` is installed it listens on `StartExecution` and rewrites the URI to `POST /graphql — mutation createReport` (operation type + client name, falling back to the root field names for anonymous operations), and stashes the breakdown under `extra.graphql_operations`. No call-site work is needed for grouping — but you still log the *business action* inside resolvers.
+
+#### What counts as an action
+
+| Site | Log? | Notes |
+|---|---|---|
+| Mutation resolver (state change) | ✅ | One log after the work succeeds — pass the model, the changes, the intent. Same rules as a controller action. |
+| Query resolver | ❌ | A read. The rewritten URI already tells you it ran; don't log the fetch. |
+| Field resolver (per-field) | ❌ | Fires once per field per row — N+1 of log lines. Never. |
+| Introspection (`__schema` / `__type`) | ❌ | IDE plumbing — already skipped by the hook when `OWLOGS_GRAPHQL_IGNORE_INTROSPECTION=true`. |
+
+#### Cardinality rule
+
+The rewritten URI is a **grouping key** — it must stay low-cardinality. The hook deliberately keeps only the operation type, the client operation name, and root field names. **Never** put GraphQL variables (`id`, `email`, field values) into the URI or any grouping field; log them in the message body instead. Putting a variable in the URI would explode the bucket count and defeat the grouping.
+
+```php
+public function createReport($root, array $args): Report
+{
+    $report = Report::create($args['input']);
+
+    Log::info('Report created via GraphQL', [
+        'operation' => 'createReport',
+        'report'    => $report,                 // HasLogContext → enriched
+        'changes'   => $report->getChanges(),
+    ]);
+
+    return $report;
+}
+```
+
+#### Batching
+
+A single HTTP request can carry several operations. The URI keeps the **first** operation (stable key); `extra.graphql_operations` accumulates every operation (type, name, root fields) for the detail view.
+
 ### Controllers (classic HTTP)
 
 Route info is auto-captured — keep call-site logs focused on outcome:

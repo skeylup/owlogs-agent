@@ -294,6 +294,25 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | GraphQL integration (Lighthouse)
+    |--------------------------------------------------------------------------
+    |
+    | When `nuwave/lighthouse` is installed, the agent listens on
+    | StartExecution and rewrites the URI of `/graphql` requests as
+    | `POST /graphql — mutation createReport` (operation type + name, with a
+    | fallback to the root field names) and stashes the operation breakdown
+    | under `extra.graphql_operations`. No-op for projects without Lighthouse.
+    |
+    */
+
+    'graphql' => [
+        'enabled' => env('OWLOGS_GRAPHQL_HOOK', true),
+        // Skip introspection queries (IDE schema fetches) — pure noise.
+        'ignore_introspection' => env('OWLOGS_GRAPHQL_IGNORE_INTROSPECTION', true),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | URI Resolver
     |--------------------------------------------------------------------------
     |
@@ -444,6 +463,12 @@ return [
         // when livewire/livewire is installed; this toggle adds the
         // standalone line so the timeline shows the call as a discrete row.
         'livewire_call' => env('OWLOGS_AUTO_LIVEWIRE_CALL', true),
+
+        // GraphQL — emit a debug line per Lighthouse operation. Context
+        // enrichment (graphql_operations array under extra) happens regardless
+        // when nuwave/lighthouse is installed; this toggle adds the standalone
+        // line so the timeline shows the operation as a discrete row.
+        'graphql_operation' => env('OWLOGS_AUTO_GRAPHQL_OPERATION', true),
 
         // Model changes
         'model_changes' => env('OWLOGS_AUTO_MODEL_CHANGES', true),

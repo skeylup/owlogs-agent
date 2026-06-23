@@ -24,6 +24,7 @@ use Laravel\Octane\Events\TaskTerminated;
 use Laravel\Octane\Events\WorkerStarting;
 use Laravel\Octane\Events\WorkerStopping;
 use Livewire\ComponentHookRegistry;
+use Nuwave\Lighthouse\Events\StartExecution;
 use Skeylup\OwlogsAgent\Compat\ContextShim;
 use Skeylup\OwlogsAgent\Compat\IdShim;
 use Skeylup\OwlogsAgent\Console\EmitTestLogsCommand;
@@ -31,6 +32,7 @@ use Skeylup\OwlogsAgent\Flushing\EndOfRequestPolicy;
 use Skeylup\OwlogsAgent\Flushing\FlushPolicy;
 use Skeylup\OwlogsAgent\Flushing\OctaneWindowPolicy;
 use Skeylup\OwlogsAgent\Flushing\RuntimeDetector;
+use Skeylup\OwlogsAgent\GraphQL\OwlogsLighthouseListener;
 use Skeylup\OwlogsAgent\Handlers\RemoteHandlerInterface;
 use Skeylup\OwlogsAgent\Handlers\RemoteLogChannel;
 use Skeylup\OwlogsAgent\Livewire\OwlogsLivewireHook;
@@ -110,6 +112,7 @@ class OwlogsAgentServiceProvider extends ServiceProvider
         $this->registerScheduleContext();
         $this->registerAutoInstrumentation();
         $this->registerAutoLogger();
+        $this->registerGraphqlHook();
         $this->registerFlushHooks();
 
         if ($this->app->runningInConsole()) {
@@ -601,6 +604,32 @@ class OwlogsAgentServiceProvider extends ServiceProvider
         }
 
         ComponentHookRegistry::register(OwlogsLivewireHook::class);
+    }
+
+    /**
+     * Listen on Lighthouse's StartExecution so /graphql requests are logged as
+     * `POST /graphql — mutation createReport` instead of one opaque endpoint.
+     *
+     * No-op when nuwave/lighthouse isn't installed.
+     */
+    private function registerGraphqlHook(): void
+    {
+        if (! config('owlogs.enabled', true)) {
+            return;
+        }
+
+        if (! config('owlogs.graphql.enabled', true)) {
+            return;
+        }
+
+        if (! class_exists(StartExecution::class)) {
+            return;
+        }
+
+        Event::listen(
+            StartExecution::class,
+            [OwlogsLighthouseListener::class, 'handle'],
+        );
     }
 
     /**
