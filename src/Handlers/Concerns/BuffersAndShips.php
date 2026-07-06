@@ -30,6 +30,28 @@ use Throwable;
  */
 trait BuffersAndShips
 {
+    /**
+     * RFC 5424 numeric severities shared by Monolog 2 and 3 — lets the trait
+     * translate the configured `dedup.cap_min_level` name without depending
+     * on either Monolog generation's level API.
+     */
+    private const MONOLOG_LEVELS = [
+        'debug' => 100,
+        'info' => 200,
+        'notice' => 250,
+        'warning' => 300,
+        'error' => 400,
+        'critical' => 500,
+        'alert' => 550,
+        'emergency' => 600,
+    ];
+
+    private const DEDUP_RATE_KEY = 'owlogs:dedup:rate:';
+
+    private const DEDUP_SAMPLE_KEY = 'owlogs:dedup:sample:';
+
+    private const DEDUP_SUPPRESSED_KEY = 'owlogs:dedup:suppressed:';
+
     private int $batchSize;
 
     private int $maxPayloadBytes;
@@ -48,6 +70,26 @@ trait BuffersAndShips
     private FlushPolicy $policy;
 
     private LogBufferStore $store;
+
+    /**
+     * Window-scoped collapse index: fingerprint → offset of the buffered row
+     * identical occurrences merge into. Reset on every flush() so entries can
+     * never point into a drained buffer — and so no dedup state leaks across
+     * flush windows (or across requests under Octane).
+     *
+     * @var array<string, int>
+     */
+    private array $dedupIndex = [];
+
+    /**
+     * Window-scoped tally of rows dropped by the per-fingerprint rate cap.
+     * Pushed to the shared Cache counter at flush time and shipped later as
+     * `suppressed_count` on the next row of the same fingerprint, so the
+     * server's occurrence statistics stay exact.
+     *
+     * @var array<string, int>
+     */
+    private array $suppressedInWindow = [];
 
     public function setPolicy(FlushPolicy $policy): void
     {
@@ -79,6 +121,21 @@ trait BuffersAndShips
      * specific `write()` override after it has decomposed the native record
      * into its constituent parts.
      *
+     * Error-storm dedup happens here, BEFORE the row costs buffer memory,
+     * store I/O or wire bytes:
+     *
+     *  - Window collapse: identical rows (same level + exception class +
+     *    caller file:line + message + user) within the current flush window
+     *    merge into a single buffered row whose `count` / `first_at` /
+     *    `last_at` fields carry the exact tally. State is window-scoped and
+     *    reset on flush — no cross-request leakage under Octane.
+     *  - Per-fingerprint rate cap (levels >= `dedup.cap_min_level` only):
+     *    once a fingerprint has shipped `dedup.max_per_minute` rows within a
+     *    minute (Cache-metered, so the cap holds across FPM processes and
+     *    Octane workers), further occurrences are dropped and only one
+     *    sampled row per `dedup.sample_interval_s` goes out, carrying the
+     *    accumulated `suppressed_count`.
+     *
      * @param  array<string, mixed>  $context
      * @param  array<string, mixed>  $extra
      */
@@ -96,28 +153,78 @@ trait BuffersAndShips
         }
 
         // Circuit tripped (server returned 403/429 within the cooldown
-        // window): drop the record outright. Buffering it would just
-        // grow the client's Redis/file backlog for shipments we know
-        // will be rejected anyway.
-        if (IngestCircuit::isTripped()) {
+        // window): drop low-severity records — buffering them would just
+        // grow the backlog for shipments we know will shed them anyway —
+        // but KEEP buffering rows at/above `circuit.retain_min_level`
+        // (default error). The store's FIFO cap bounds the retained
+        // backlog; drops are tallied and reported in one synthetic
+        // diagnostic row once the circuit closes.
+        if (IngestCircuit::isTripped() && $levelValue < $this->circuitRetainMinLevel()) {
+            IngestCircuit::recordDropped('low_severity');
+
             return;
         }
 
+        $fingerprint = null;
+
+        if ($this->dedupEnabled()) {
+            $fingerprint = $this->fingerprint($levelValue, $message, $context, $extra);
+
+            // Identical row already buffered this window: collapse into it.
+            if (isset($this->dedupIndex[$fingerprint])) {
+                $this->collapseInto($this->dedupIndex[$fingerprint], $datetime);
+                $this->policy->onWrite($this);
+
+                return;
+            }
+
+            // Fingerprint already suppressed this window: tally and drop.
+            if (isset($this->suppressedInWindow[$fingerprint])) {
+                $this->suppressedInWindow[$fingerprint]++;
+                $this->policy->onWrite($this);
+
+                return;
+            }
+
+            if ($this->levelIsRateCapped($levelValue)) {
+                $shippedThisMinute = $this->meterShippedRow($fingerprint);
+
+                if ($shippedThisMinute > $this->maxRowsPerMinute() && ! $this->acquireSampleSlot($fingerprint)) {
+                    // Over the per-minute cap and a sampled row already went
+                    // out within the sample interval: suppress. The tally is
+                    // persisted at flush time and rides out on the next row
+                    // of this fingerprint as `suppressed_count`.
+                    $this->suppressedInWindow[$fingerprint] = 1;
+                    $this->registerShutdownFlush();
+                    $this->policy->onWrite($this);
+
+                    return;
+                }
+            }
+        }
+
         $row = $this->buildRow($channel, $levelValue, $levelName, $message, $context, $extra, $datetime);
+
+        if ($fingerprint !== null && $this->levelIsRateCapped($levelValue)) {
+            $pendingSuppressed = $this->claimSuppressedCount($fingerprint);
+            if ($pendingSuppressed > 0) {
+                $row['suppressed_count'] = $pendingSuppressed;
+            }
+        }
+
         $encoded = json_encode($row, JSON_UNESCAPED_UNICODE);
         $this->bufferBytes += $encoded !== false ? strlen($encoded) : 0;
         $this->buffer[] = $row;
+
+        if ($fingerprint !== null) {
+            $this->dedupIndex[$fingerprint] = count($this->buffer) - 1;
+        }
 
         if ($this->firstBufferedAt === null) {
             $this->firstBufferedAt = microtime(true);
         }
 
-        if (! $this->shutdownRegistered) {
-            $this->shutdownRegistered = true;
-            register_shutdown_function(function (): void {
-                $this->flush(true);
-            });
-        }
+        $this->registerShutdownFlush();
 
         // Hard ceiling: bypass any policy when the buffer grows unreasonably.
         // Protects against a runaway caller logging faster than we can ship
@@ -133,17 +240,222 @@ trait BuffersAndShips
         $this->policy->onWrite($this);
     }
 
+    private function dedupEnabled(): bool
+    {
+        return (bool) config('owlogs.dedup.enabled', true);
+    }
+
+    /**
+     * Identity of a row for collapse / rate-cap purposes: level + exception
+     * class + caller file:line + message + user. The user id is part of the
+     * fingerprint on purpose — collapsing across actors would lose the
+     * per-user rows "who was affected" queries rely on during storms.
+     *
+     * @param  array<string, mixed>  $context
+     * @param  array<string, mixed>  $extra
+     */
+    private function fingerprint(int $levelValue, string $message, array $context, array $extra): string
+    {
+        $exceptionClass = isset($context['exception']) && $context['exception'] instanceof Throwable
+            ? get_class($context['exception'])
+            : '';
+
+        $userId = ContextShim::getHidden('user_id');
+
+        return md5(
+            $levelValue.'|'
+            .$exceptionClass.'|'
+            .(string) ($extra['caller_file'] ?? '').':'.(string) ($extra['caller_line'] ?? '').'|'
+            .$message.'|'
+            .(is_scalar($userId) ? (string) $userId : ''),
+        );
+    }
+
+    /**
+     * Merge an identical occurrence into the row buffered earlier in this
+     * flush window: bump `count`, stamp `first_at` / `last_at` so the exact
+     * spread of the collapsed occurrences survives the merge.
+     */
+    private function collapseInto(int $index, DateTimeInterface $datetime): void
+    {
+        $this->buffer[$index]['count'] = (int) ($this->buffer[$index]['count'] ?? 1) + 1;
+
+        if (! isset($this->buffer[$index]['first_at'])) {
+            $this->buffer[$index]['first_at'] = $this->buffer[$index]['logged_at'];
+        }
+
+        $this->buffer[$index]['last_at'] = $datetime
+            ->setTimezone(new DateTimeZone('UTC'))
+            ->format('Y-m-d H:i:s.v');
+    }
+
+    private function levelIsRateCapped(int $levelValue): bool
+    {
+        $name = strtolower((string) config('owlogs.dedup.cap_min_level', 'warning'));
+
+        return $levelValue >= (self::MONOLOG_LEVELS[$name] ?? self::MONOLOG_LEVELS['warning']);
+    }
+
+    /**
+     * Minimum severity kept while the ingest circuit is tripped. Rows at or
+     * above this level keep flowing to the cross-process store during the
+     * cooldown (the server accepts them on its quota grace budget); lower
+     * rows are dropped and tallied.
+     */
+    private function circuitRetainMinLevel(): int
+    {
+        $name = strtolower((string) config('owlogs.transport.circuit.retain_min_level', 'error'));
+
+        return self::MONOLOG_LEVELS[$name] ?? self::MONOLOG_LEVELS['error'];
+    }
+
+    /**
+     * Persist the retained-severity slice of a flush that happened while the
+     * circuit was tripped; tally the dropped remainder for the diagnostic row.
+     *
+     * @param  list<array<string, mixed>>  $rows
+     */
+    private function storeRetainedSlice(array $rows): void
+    {
+        if ($rows === []) {
+            return;
+        }
+
+        $minLevel = $this->circuitRetainMinLevel();
+        $retained = [];
+        $droppedLow = 0;
+
+        foreach ($rows as $row) {
+            if ((int) ($row['level'] ?? 0) >= $minLevel) {
+                $retained[] = $row;
+            } else {
+                // Collapsed rows represent `count` occurrences each.
+                $droppedLow += max(1, (int) ($row['count'] ?? 1));
+            }
+        }
+
+        if ($droppedLow > 0) {
+            IngestCircuit::recordDropped('low_severity', $droppedLow);
+        }
+
+        if ($retained === []) {
+            return;
+        }
+
+        try {
+            $this->store->append($retained);
+        } catch (Throwable) {
+            // Store momentarily unavailable — same silent contract as the
+            // regular flush path.
+        }
+    }
+
+    private function maxRowsPerMinute(): int
+    {
+        return max(1, (int) config('owlogs.dedup.max_per_minute', 60));
+    }
+
+    /**
+     * Count one shipped row for this fingerprint in the current minute and
+     * return the running total. Cache-backed so the cap holds across FPM
+     * processes and Octane workers alike; on Cache failure the cap silently
+     * disengages — shipping beats losing data.
+     */
+    private function meterShippedRow(string $fingerprint): int
+    {
+        try {
+            $key = self::DEDUP_RATE_KEY.$fingerprint;
+            Cache::add($key, 0, now()->addSeconds(60));
+
+            return (int) Cache::increment($key);
+        } catch (Throwable) {
+            return 1;
+        }
+    }
+
+    /**
+     * True when this over-cap occurrence may go out as the one sampled row
+     * of the current sample interval.
+     */
+    private function acquireSampleSlot(string $fingerprint): bool
+    {
+        $intervalS = max(1, (int) config('owlogs.dedup.sample_interval_s', 30));
+
+        try {
+            return Cache::add(self::DEDUP_SAMPLE_KEY.$fingerprint, 1, now()->addSeconds($intervalS));
+        } catch (Throwable) {
+            return true;
+        }
+    }
+
+    /**
+     * Claim the accumulated suppressed tally for a fingerprint so the row
+     * being buffered can carry it as `suppressed_count`. Decrements instead
+     * of deleting so concurrent increments from other processes are never
+     * lost.
+     */
+    private function claimSuppressedCount(string $fingerprint): int
+    {
+        $key = self::DEDUP_SUPPRESSED_KEY.$fingerprint;
+
+        try {
+            $pending = (int) Cache::get($key, 0);
+            if ($pending > 0) {
+                Cache::decrement($key, $pending);
+            }
+
+            return $pending;
+        } catch (Throwable) {
+            return 0;
+        }
+    }
+
+    /**
+     * Push the window's suppressed tallies to the shared Cache counters at
+     * flush time (one increment per fingerprint per window — never one per
+     * suppressed row). Generous TTL so a storm tail is still claimed by the
+     * next row of the same fingerprint minutes later.
+     *
+     * @param  array<string, int>  $tallies
+     */
+    private function persistSuppressedTallies(array $tallies): void
+    {
+        foreach ($tallies as $fingerprint => $count) {
+            try {
+                $key = self::DEDUP_SUPPRESSED_KEY.$fingerprint;
+                Cache::add($key, 0, now()->addSeconds(900));
+                Cache::increment($key, $count);
+            } catch (Throwable) {
+                // Best-effort — a lost tally only undercounts suppressed rows.
+            }
+        }
+    }
+
+    private function registerShutdownFlush(): void
+    {
+        if ($this->shutdownRegistered) {
+            return;
+        }
+
+        $this->shutdownRegistered = true;
+        register_shutdown_function(function (): void {
+            $this->flush(true);
+        });
+    }
+
     /**
      * Flush: drain the RAM buffer into the cross-process LogBufferStore
      * and debounce-dispatch a ShipBufferedLogsJob. Attaches the process
      * memory peak to the last row of the batch (measures are captured
-     * per-row at log time in buildRow(), not here).
+     * per-row at log time in buildRow(), not here). Also resets the
+     * window-scoped dedup state and persists the window's suppressed
+     * tallies.
      *
      * @param  bool  $force  reserved for future use; flush is always unconditional now
      */
     public function flush(bool $force = false): void
     {
-        if ($this->buffer === []) {
+        if ($this->buffer === [] && $this->suppressedInWindow === []) {
             return;
         }
 
@@ -159,8 +471,26 @@ trait BuffersAndShips
             $this->buffer = [];
             $this->bufferBytes = 0;
             $this->firstBufferedAt = null;
+            $this->dedupIndex = [];
+
+            $suppressed = $this->suppressedInWindow;
+            $this->suppressedInWindow = [];
 
             if (IngestCircuit::isTripped()) {
+                // Persist ONLY the retained-severity slice to the store so
+                // error/critical rows survive the cooldown (FIFO-capped);
+                // lower levels buffered before the trip are dropped and
+                // tallied for the post-outage diagnostic row. No ship job
+                // is dispatched while the circuit is open.
+                $this->persistSuppressedTallies($suppressed);
+                $this->storeRetainedSlice($rows);
+
+                return;
+            }
+
+            $this->persistSuppressedTallies($suppressed);
+
+            if ($rows === []) {
                 return;
             }
 
@@ -291,6 +621,11 @@ trait BuffersAndShips
             'measures' => isset($contextData['measures']) ? json_encode($contextData['measures'], JSON_UNESCAPED_UNICODE) : null,
             'memory_peak_mb' => null,
             'extra' => $this->buildExtra($extra, $contextData),
+
+            // Number of identical occurrences this row represents. Starts at
+            // 1 and grows when the window collapse merges duplicates in;
+            // servers unaware of the field treat every row as one occurrence.
+            'count' => 1,
 
             'logged_at' => $datetime->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s.v'),
         ];

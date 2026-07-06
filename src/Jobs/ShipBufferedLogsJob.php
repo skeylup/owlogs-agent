@@ -93,24 +93,27 @@ class ShipBufferedLogsJob implements ShouldQueue
         // job → loop.
         RemoteHandler::suppressedWhile(function () use ($store): void {
             // Circuit tripped (a previous ship hit 403/429 and the
-            // cooldown is still in flight): wipe the backlog and exit.
-            // Any rows in flight are guaranteed to fail with the same
-            // status — better to drop them now than to keep the queue
-            // busy and the client's buffer growing.
+            // cooldown is still in flight): exit WITHOUT touching the
+            // spool. Retained rows (error/critical buffered during the
+            // cooldown plus the pre-trip backlog) survive within the
+            // FIFO cap and ship once the circuit re-arms; the max-age
+            // filter bounds how stale a post-outage burst can get.
             if (IngestCircuit::isTripped()) {
-                $store->clear();
-
                 return;
             }
 
             $batchCount = (int) config('owlogs.transport.ship.batch_count', 256);
 
-            $rows = $store->drain($batchCount);
-            if ($rows === []) {
-                return;
+            $rows = $this->dropStaleRows($store->drain($batchCount));
+
+            // Outage over: prepend ONE synthetic diagnostic row carrying the
+            // drop tallies accumulated while the circuit was tripped, so the
+            // gap is visible server-side instead of silently swallowed.
+            $dropped = IngestCircuit::claimDropped();
+            if ($dropped !== []) {
+                array_unshift($rows, $this->buildDropReportRow($dropped));
             }
 
-            $rows = $this->dropStaleRows($rows);
             if ($rows === []) {
                 if ($store->size() > 0) {
                     $this->scheduleFollowUp();
@@ -128,11 +131,15 @@ class ShipBufferedLogsJob implements ShouldQueue
     }
 
     /**
-     * Filter out rows whose `logged_at` timestamp is older than the
-     * configured `buffer.max_age_s` window. Protects the server from a
-     * burst of stale data when shipments resume after a long stall
-     * (queue worker outage, network blip) and bounds the value of any
-     * data we still try to ship.
+     * Filter out rows whose timestamp is older than the configured
+     * `buffer.max_age_s` window. Protects the server from a burst of
+     * stale data when shipments resume after a long stall (queue worker
+     * outage, network blip) and bounds the value of any data we still
+     * try to ship.
+     *
+     * Collapsed rows (dedup `count` > 1) are judged by `last_at` — their
+     * `logged_at` is the FIRST occurrence, but the row is fresh as long
+     * as its latest occurrence is.
      *
      * Drop is silent — count goes into a single summary log on the
      * local `single` channel (owlogs is suppressed inside handle()).
@@ -142,8 +149,8 @@ class ShipBufferedLogsJob implements ShouldQueue
      */
     private function dropStaleRows(array $rows): array
     {
-        $maxAgeS = (int) config('owlogs.transport.buffer.max_age_s', 0);
-        if ($maxAgeS <= 0) {
+        $maxAgeS = $this->effectiveMaxAgeS();
+        if ($maxAgeS <= 0 || $rows === []) {
             return $rows;
         }
 
@@ -154,7 +161,7 @@ class ShipBufferedLogsJob implements ShouldQueue
         $dropped = 0;
 
         foreach ($rows as $row) {
-            $loggedAt = $row['logged_at'] ?? null;
+            $loggedAt = $row['last_at'] ?? $row['logged_at'] ?? null;
 
             if (! is_string($loggedAt) || $loggedAt === '') {
                 $kept[] = $row;
@@ -185,6 +192,10 @@ class ShipBufferedLogsJob implements ShouldQueue
         }
 
         if ($dropped > 0) {
+            // Tallied into the drop-episode counters so the synthetic
+            // diagnostic row reports the gap once shipments recover.
+            IngestCircuit::recordDropped('stale', $dropped);
+
             try {
                 logger()->channel('single')->warning(
                     'Owlogs dropped stale buffered logs',
@@ -203,6 +214,51 @@ class ShipBufferedLogsJob implements ShouldQueue
     }
 
     /**
+     * Stale cutoff for the current drain. Inside an outage/recovery window
+     * (circuit tripped, or its cooldown recently elapsed) the wider
+     * `buffer.retry_max_age_s` applies so the backlog retained through the
+     * cooldown is not wiped as "too old" on the first post-outage ship.
+     */
+    private function effectiveMaxAgeS(): int
+    {
+        $maxAgeS = (int) config('owlogs.transport.buffer.max_age_s', 0);
+
+        if (! IngestCircuit::inRecoveryWindow()) {
+            return $maxAgeS;
+        }
+
+        return max($maxAgeS, (int) config('owlogs.transport.buffer.retry_max_age_s', 600));
+    }
+
+    /**
+     * Synthetic diagnostic row summarising an outage/drop episode. Built by
+     * hand (never through Monolog) so it cannot re-enter the handler while
+     * RemoteHandler::suppressedWhile() is active — no feedback loop.
+     *
+     * @param  array<string, int>  $dropped  reason → dropped row count
+     * @return array<string, mixed>
+     */
+    private function buildDropReportRow(array $dropped): array
+    {
+        $total = array_sum($dropped);
+        $context = [
+            'dropped' => $dropped,
+            'total' => $total,
+            'circuit' => IngestCircuit::state(),
+        ];
+
+        return [
+            'message' => "owlogs.agent.dropped_rows: {$total} log rows were dropped client-side during an ingest outage",
+            'level' => 300,
+            'level_name' => 'WARNING',
+            'channel' => 'owlogs',
+            'origin' => 'internal',
+            'context' => json_encode($context, JSON_UNESCAPED_UNICODE) ?: null,
+            'logged_at' => (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format('Y-m-d H:i:s.v'),
+        ];
+    }
+
+    /**
      * @param  list<array<string, mixed>>  $rows
      */
     private function sendAll(array $rows, LogBufferStore $store): void
@@ -215,17 +271,46 @@ class ShipBufferedLogsJob implements ShouldQueue
 
         $maxBytes = (int) config('owlogs.transport.max_payload_bytes', 512 * 1024);
 
-        foreach ($this->chunkBySize($rows, $maxBytes) as $chunk) {
-            // If a previous chunk in this job tripped the circuit,
-            // stop iterating — clear the store and exit before we try
-            // to POST another doomed chunk.
+        $chunks = $this->chunkBySize($rows, $maxBytes);
+
+        foreach ($chunks as $index => $chunk) {
+            // If a previous chunk in this job tripped the circuit, stop
+            // iterating — requeue the unsent remainder so it survives the
+            // cooldown (FIFO cap + stale filter bound the backlog) instead
+            // of POSTing more doomed chunks or wiping the spool.
             if (IngestCircuit::isTripped()) {
-                $store->clear();
+                $this->requeueChunks(array_slice($chunks, $index), $store);
 
                 return;
             }
 
             $this->sendChunk($chunk, $apiKey, $store);
+        }
+    }
+
+    /**
+     * Push unsent chunks back onto the cross-process store so the backlog
+     * survives a circuit trip. Best-effort — the store enforces its FIFO
+     * `max_rows` cap, and stale rows are aged out on the next drain.
+     *
+     * @param  list<list<array<string, mixed>>>  $chunks
+     */
+    private function requeueChunks(array $chunks, LogBufferStore $store): void
+    {
+        if ($chunks === []) {
+            return;
+        }
+
+        $rows = array_merge(...$chunks);
+        if ($rows === []) {
+            return;
+        }
+
+        try {
+            $store->append($rows);
+        } catch (Throwable) {
+            // Store unavailable — nothing more we can do; the drop stays
+            // invisible only until the next episode report.
         }
     }
 
@@ -267,12 +352,10 @@ class ShipBufferedLogsJob implements ShouldQueue
 
             $status = $response->status();
 
-            // 403 (no plan) and 429 (quota exhausted) are fatal at the
-            // tenant level — retrying just burns CPU for the same
-            // verdict. Trip the circuit so further records get dropped
-            // on the floor for the configured cooldown, wipe the
-            // backlog so we don't carry it through, and fail() so this
-            // job stops retrying.
+            // 403 (no plan) is fatal at the tenant level and needs a human
+            // to fix (subscribe) — retrying just burns CPU for the same
+            // verdict. Trip the circuit and wipe the backlog: nothing will
+            // be accepted until the plan changes.
             if ($status === 403) {
                 IngestCircuit::trip(403, 'subscription_required');
                 $store->clear();
@@ -281,9 +364,15 @@ class ShipBufferedLogsJob implements ShouldQueue
                 return;
             }
 
+            // 429 (quota exhausted) is temporary — the server sheds
+            // low-severity rows but keeps accepting error/critical on a
+            // grace budget, and quota resets monthly. Trip the circuit but
+            // KEEP the spool: the failed chunk goes back onto the store and
+            // ships once the cooldown elapses, bounded by the FIFO cap and
+            // the `buffer.retry_max_age_s` stale filter.
             if ($status === 429) {
                 IngestCircuit::trip(429, 'quota_exhausted');
-                $store->clear();
+                $this->requeueChunks([$chunk], $store);
                 $this->fail(new \RuntimeException('Owlogs quota exhausted: '.$response->body()));
 
                 return;

@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Request;
 use Livewire\ComponentHook;
 use Skeylup\OwlogsAgent\Compat\ContextShim;
+use Skeylup\OwlogsAgent\Support\Redactor;
 
 /**
  * Captures Livewire component activity into the Owlogs Context so the
@@ -27,11 +28,6 @@ class OwlogsLivewireHook extends ComponentHook
 
     /** Per-param string cap inside `livewire_calls` to keep the row small. */
     private const MAX_PARAM_LENGTH = 256;
-
-    /** Substrings that mark a param key as sensitive (matched case-insensitively). */
-    private const SENSITIVE_PATTERNS = [
-        'secret', 'token', 'password', 'key', 'authorization', 'cookie', 'credit_card',
-    ];
 
     /**
      * Fires at the start of every subsequent component request (the
@@ -119,23 +115,17 @@ class OwlogsLivewireHook extends ComponentHook
     }
 
     /**
+     * Mask sensitive keys via the shared config-driven Redactor
+     * (config('owlogs.redaction')), then truncate oversized strings.
+     *
      * @param  array<mixed>  $params
      * @return array<mixed>
      */
     private function sanitizeParams(array $params): array
     {
-        array_walk_recursive($params, function (&$value, $key): void {
-            if (is_string($key)) {
-                $lower = strtolower($key);
-                foreach (self::SENSITIVE_PATTERNS as $pattern) {
-                    if (str_contains($lower, $pattern)) {
-                        $value = '********';
+        $params = app(Redactor::class)->redact($params);
 
-                        return;
-                    }
-                }
-            }
-
+        array_walk_recursive($params, function (&$value): void {
             if (is_string($value) && mb_strlen($value) > self::MAX_PARAM_LENGTH) {
                 $value = mb_substr($value, 0, self::MAX_PARAM_LENGTH).'…';
             }

@@ -27,7 +27,9 @@ use Livewire\ComponentHookRegistry;
 use Nuwave\Lighthouse\Events\StartExecution;
 use Skeylup\OwlogsAgent\Compat\ContextShim;
 use Skeylup\OwlogsAgent\Compat\IdShim;
+use Skeylup\OwlogsAgent\Console\DoctorCommand;
 use Skeylup\OwlogsAgent\Console\EmitTestLogsCommand;
+use Skeylup\OwlogsAgent\Console\InstallCommand;
 use Skeylup\OwlogsAgent\Flushing\EndOfRequestPolicy;
 use Skeylup\OwlogsAgent\Flushing\FlushPolicy;
 use Skeylup\OwlogsAgent\Flushing\OctaneWindowPolicy;
@@ -37,6 +39,8 @@ use Skeylup\OwlogsAgent\Handlers\RemoteHandlerInterface;
 use Skeylup\OwlogsAgent\Handlers\RemoteLogChannel;
 use Skeylup\OwlogsAgent\Livewire\OwlogsLivewireHook;
 use Skeylup\OwlogsAgent\Middleware\AddLogContext;
+use Skeylup\OwlogsAgent\Support\Redactor;
+use Skeylup\OwlogsAgent\Support\Sampler;
 use Skeylup\OwlogsAgent\Transport\FileLogBufferStore;
 use Skeylup\OwlogsAgent\Transport\InMemoryLogBufferStore;
 use Skeylup\OwlogsAgent\Transport\LogBufferStore;
@@ -93,6 +97,12 @@ class OwlogsAgentServiceProvider extends ServiceProvider
                 (string) config('owlogs.transport.redis_key', 'owlogs:buffer'),
             );
         });
+
+        // Octane-safe: both take no request/config state in their
+        // constructors and read config('owlogs.redaction') /
+        // config('owlogs.sampling') lazily per call.
+        $this->app->singleton(Redactor::class, static fn (): Redactor => new Redactor);
+        $this->app->singleton(Sampler::class, static fn (): Sampler => new Sampler);
     }
 
     public function boot(): void
@@ -121,7 +131,9 @@ class OwlogsAgentServiceProvider extends ServiceProvider
             ], 'owlogs-agent-config');
 
             $this->commands([
+                DoctorCommand::class,
                 EmitTestLogsCommand::class,
+                InstallCommand::class,
             ]);
         }
     }

@@ -35,6 +35,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use Skeylup\OwlogsAgent\Support\Redactor;
 
 /**
  * Automatically logs Laravel lifecycle events.
@@ -730,18 +731,19 @@ class AutoLogger
     }
 
     /**
+     * Mask sensitive attributes via the shared config-driven Redactor
+     * (config('owlogs.redaction')), then truncate oversized strings.
+     *
      * @param  array<string, mixed>  $attributes
      * @return array<string, mixed>
      */
     private function safeAttributes(array $attributes): array
     {
-        $sensitive = ['password', 'secret', 'token', 'api_key', 'remember_token', 'two_factor_secret', 'two_factor_recovery_codes'];
+        $attributes = app(Redactor::class)->redact($attributes);
 
-        foreach ($attributes as $key => &$value) {
-            if (in_array($key, $sensitive, true)) {
-                $value = '********';
-            } elseif (is_string($value) && mb_strlen($value) > 200) {
-                $value = Str::limit($value, 200);
+        foreach ($attributes as $key => $value) {
+            if (is_string($value) && mb_strlen($value) > 200) {
+                $attributes[$key] = Str::limit($value, 200);
             }
         }
 

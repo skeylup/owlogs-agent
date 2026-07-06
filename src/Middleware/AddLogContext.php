@@ -16,6 +16,7 @@ use Skeylup\OwlogsAgent\Compat\ContextShim;
 use Skeylup\OwlogsAgent\Compat\IdShim;
 use Skeylup\OwlogsAgent\Contracts\HasLogContext;
 use Skeylup\OwlogsAgent\Handlers\RemoteHandler;
+use Skeylup\OwlogsAgent\Support\Redactor;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 
@@ -349,25 +350,17 @@ class AddLogContext
             return;
         }
 
-        $input = $request->except([
-            'password', 'password_confirmation', 'current_password',
-            '_token', '_method',
-            'components',
-        ]);
+        // Structural noise only — `_token`/`_method` are framework plumbing
+        // and `components` is Livewire's full snapshot payload. PII masking
+        // is handled by the shared Redactor, driven by
+        // config('owlogs.redaction') (password & friends are masked there).
+        $input = $request->except(['_token', '_method', 'components']);
 
         if ($input === []) {
             return;
         }
 
-        $sensitivePatterns = ['secret', 'token', 'key', 'authorization', 'cookie', 'credit_card'];
-        array_walk_recursive($input, function (&$value, $key) use ($sensitivePatterns) {
-            foreach ($sensitivePatterns as $pattern) {
-                if (is_string($key) && Str::contains(strtolower($key), $pattern)) {
-                    $value = '********';
-                    break;
-                }
-            }
-        });
+        $input = app(Redactor::class)->redact($input);
 
         $json = json_encode($input, JSON_UNESCAPED_UNICODE);
         if ($json !== false && mb_strlen($json) > 4096) {

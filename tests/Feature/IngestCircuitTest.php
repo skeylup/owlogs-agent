@@ -58,7 +58,7 @@ it('trips the circuit on 403 and stops further retries', function (): void {
     expect($state['reason'])->toBe('subscription_required');
 });
 
-it('trips the circuit on 429 and wipes the backlog', function (): void {
+it('trips the circuit on 429 but retains the spool for a post-cooldown retry', function (): void {
     Http::fake(['*' => Http::response('quota', 429)]);
 
     $this->store->append([
@@ -70,7 +70,9 @@ it('trips the circuit on 429 and wipes the backlog', function (): void {
     $job->handle($this->store);
 
     expect(IngestCircuit::isTripped())->toBeTrue();
-    expect($this->store->size())->toBe(0);
+    // 429 is temporary (quota resets / grace budget) — the failed chunk is
+    // requeued instead of wiped so errors survive the cooldown.
+    expect($this->store->size())->toBe(2);
     $state = IngestCircuit::state();
     expect($state['status'])->toBe(429);
     expect($state['reason'])->toBe('quota_exhausted');
@@ -92,7 +94,7 @@ it('does NOT trip the circuit on a 5xx transient error', function (): void {
     expect(IngestCircuit::isTripped())->toBeFalse();
 });
 
-it('ShipBufferedLogsJob exits early and clears the store when circuit is already tripped', function (): void {
+it('ShipBufferedLogsJob exits early and KEEPS the spool when circuit is already tripped', function (): void {
     IngestCircuit::trip(429, 'quota_exhausted');
 
     $this->store->append([
@@ -103,7 +105,9 @@ it('ShipBufferedLogsJob exits early and clears the store when circuit is already
     $job = new ShipBufferedLogsJob;
     $job->handle($this->store);
 
-    expect($this->store->size())->toBe(0);
+    // No HTTP work while tripped, but the backlog survives the cooldown
+    // (bounded by the FIFO cap + the retry_max_age_s stale filter).
+    expect($this->store->size())->toBe(2);
     Http::assertNothingSent();
 });
 
@@ -180,14 +184,16 @@ it('drops rows older than max_age_s at drain time', function (): void {
     $job = new ShipBufferedLogsJob;
     $job->handle($this->store);
 
-    // Only the fresh row reached the server.
+    // The fresh row reached the server; the stale drop is no longer
+    // silent — a synthetic diagnostic row reports it in the same batch.
     Http::assertSent(function ($request) {
         $body = json_decode(gzdecode($request->body()) ?: $request->body(), true);
+        $messages = array_column($body['logs'] ?? [], 'message');
 
         return is_array($body)
-            && isset($body['logs'])
-            && count($body['logs']) === 1
-            && ($body['logs'][0]['message'] ?? null) === 'fresh';
+            && count($messages) === 2
+            && str_starts_with((string) $messages[0], 'owlogs.agent.dropped_rows')
+            && $messages[1] === 'fresh';
     });
 });
 
@@ -227,4 +233,145 @@ it('clear() wipes the in-memory store atomically', function (): void {
     expect($store->size())->toBe(2);
     $store->clear();
     expect($store->size())->toBe(0);
+});
+
+it('keeps buffering error/critical rows during the cooldown and tallies dropped low-severity rows', function (): void {
+    IngestCircuit::trip(429, 'quota_exhausted');
+
+    $handler = new RemoteHandlerV3(store: $this->store);
+    $write = new ReflectionMethod($handler, 'write');
+
+    // Info is below the retain level → dropped on the floor, tallied.
+    $write->invoke($handler, makeRecord('low severity chatter'));
+    expect($handler->bufferCount())->toBe(0);
+
+    // Error keeps buffering within the FIFO cap.
+    $write->invoke($handler, makeLogRecord('boom', Level::Error));
+    expect($handler->bufferCount())->toBe(1);
+
+    expect(IngestCircuit::claimDropped())->toBe(['low_severity' => 1]);
+});
+
+it('flush() during the cooldown persists only the retained-severity slice to the store', function (): void {
+    $handler = new RemoteHandlerV3(store: $this->store);
+    $write = new ReflectionMethod($handler, 'write');
+
+    // Buffer one info + one error while the circuit is still closed.
+    $write->invoke($handler, makeRecord('pre-trip info'));
+    $write->invoke($handler, makeLogRecord('pre-trip error', Level::Error));
+    expect($handler->bufferCount())->toBe(2);
+
+    IngestCircuit::trip(429, 'quota_exhausted');
+    $handler->flush();
+
+    expect($handler->bufferCount())->toBe(0);
+
+    $rows = $this->store->drain(10);
+    expect(count($rows))->toBe(1)
+        ->and((int) $rows[0]['level'])->toBe(400)
+        ->and($rows[0]['message'])->toBe('pre-trip error');
+
+    expect(IngestCircuit::claimDropped())->toBe(['low_severity' => 1]);
+});
+
+it('emits ONE synthetic diagnostic row with the drop counts once the circuit closes', function (): void {
+    Http::fake(['*' => Http::response('', 200)]);
+
+    IngestCircuit::recordDropped('low_severity', 7);
+    IngestCircuit::recordDropped('stale', 3);
+
+    $this->store->append([
+        ['message' => 'fresh error', 'level' => 400, 'level_name' => 'ERROR', 'logged_at' => gmdate('Y-m-d H:i:s.0')],
+    ]);
+
+    (new ShipBufferedLogsJob)->handle($this->store);
+
+    Http::assertSent(function ($request): bool {
+        $body = json_decode(gzdecode($request->body()) ?: $request->body(), true);
+        $logs = $body['logs'] ?? [];
+        if (count($logs) !== 2) {
+            return false;
+        }
+
+        $diag = $logs[0];
+        $context = json_decode((string) ($diag['context'] ?? ''), true);
+
+        return str_starts_with((string) $diag['message'], 'owlogs.agent.dropped_rows')
+            && ($diag['level_name'] ?? null) === 'WARNING'
+            && (($context['dropped']['low_severity'] ?? null) === 7)
+            && (($context['dropped']['stale'] ?? null) === 3)
+            && (($context['total'] ?? null) === 10)
+            && ($logs[1]['message'] ?? null) === 'fresh error';
+    });
+
+    // Tallies were claimed — the next ship carries no diagnostic row.
+    $this->store->append([
+        ['message' => 'later row', 'logged_at' => gmdate('Y-m-d H:i:s.0')],
+    ]);
+    (new ShipBufferedLogsJob)->handle($this->store);
+
+    Http::assertSentCount(2);
+    $last = json_decode(gzdecode(Http::recorded()[1][0]->body()) ?: Http::recorded()[1][0]->body(), true);
+    expect(count($last['logs']))->toBe(1)
+        ->and($last['logs'][0]['message'])->toBe('later row');
+});
+
+it('ships the diagnostic row alone when the spool is empty after an episode', function (): void {
+    Http::fake(['*' => Http::response('', 200)]);
+
+    IngestCircuit::recordDropped('low_severity', 2);
+
+    (new ShipBufferedLogsJob)->handle($this->store);
+
+    Http::assertSent(function ($request): bool {
+        $body = json_decode(gzdecode($request->body()) ?: $request->body(), true);
+        $logs = $body['logs'] ?? [];
+
+        return count($logs) === 1
+            && str_starts_with((string) $logs[0]['message'], 'owlogs.agent.dropped_rows');
+    });
+});
+
+it('widens the stale cutoff to retry_max_age_s inside the recovery window', function (): void {
+    Http::fake(['*' => Http::response('', 200)]);
+    config([
+        'owlogs.transport.buffer.max_age_s' => 60,
+        'owlogs.transport.buffer.retry_max_age_s' => 600,
+    ]);
+
+    // Simulate "cooldown elapsed moments ago": circuit closed, recovery
+    // window still open.
+    Cache::put(IngestCircuit::RECOVERY_KEY, 1, 600);
+
+    $fiveMinOld = (new DateTimeImmutable('-5 minutes', new DateTimeZone('UTC')))->format('Y-m-d H:i:s.v');
+    $twentyMinOld = (new DateTimeImmutable('-20 minutes', new DateTimeZone('UTC')))->format('Y-m-d H:i:s.v');
+
+    $this->store->append([
+        ['message' => 'ancient', 'logged_at' => $twentyMinOld],
+        ['message' => 'retained backlog', 'logged_at' => $fiveMinOld],
+    ]);
+
+    (new ShipBufferedLogsJob)->handle($this->store);
+
+    Http::assertSent(function ($request): bool {
+        $body = json_decode(gzdecode($request->body()) ?: $request->body(), true);
+        $messages = array_column($body['logs'] ?? [], 'message');
+
+        // The 5-minute-old backlog survives (60s cutoff would have wiped
+        // it); the 20-minute-old row is dropped and reported by the
+        // prepended diagnostic row.
+        return in_array('retained backlog', $messages, true)
+            && ! in_array('ancient', $messages, true)
+            && str_starts_with((string) ($messages[0] ?? ''), 'owlogs.agent.dropped_rows');
+    });
+});
+
+it('trip() opens the recovery window and reset() closes it', function (): void {
+    expect(IngestCircuit::inRecoveryWindow())->toBeFalse();
+
+    IngestCircuit::trip(429, 'quota_exhausted');
+    expect(IngestCircuit::inRecoveryWindow())->toBeTrue();
+
+    IngestCircuit::reset();
+    expect(IngestCircuit::inRecoveryWindow())->toBeFalse();
 });

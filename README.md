@@ -57,9 +57,12 @@ Drop-in, zero-config, Octane-safe. Works with Laravel 8.65 through 13.
 
 ```bash
 composer require skeylup/owlogs-agent
+php artisan owlogs:install --key=owl_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
-Add your workspace API key to `.env` — grab it from your workspace's **API keys** page on [owlogs.com](https://www.owlogs.com):
+That's the recommended path. The installer validates the key against the ingest endpoint (a bad key aborts before anything is written), writes the `OWLOGS_*` block to `.env` (diff-aware — existing lines are updated in place, package defaults are never added), auto-detects the buffer store (`redis` when reachable, `file` otherwise) and finishes by running `php artisan owlogs:doctor`. Useful flags: `--ingest-url=`, `--buffer-store=redis|file`, `--queue=`, `--env-file=`, `--no-validate`, `--emit-test-logs`, `--skip-doctor`. Grab the key from your workspace's **API keys** page on [owlogs.com](https://www.owlogs.com).
+
+**Manual alternative** — add the key to `.env` yourself:
 
 ```env
 OWLOGS_API_KEY=owl_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
@@ -431,6 +434,16 @@ Expected responses:
 
 ## Troubleshooting
 
+**Start with the doctor.** It checks every link of the shipping chain in one pass — API key, ingest endpoint (authenticated ping), buffer store, cache debounce, queue connection, worker heuristic, ingest circuit and pending backlog — and exits non-zero only when a check fails (safe for CI):
+
+```bash
+php artisan owlogs:doctor
+```
+
+Flags: `--reset-circuit` closes a tripped ingest circuit before running the checks; `--queue-timeout=5` sets how long the worker probe waits. Follow up with `php artisan owlogs:emit-test-logs` to push one log of every captured kind and confirm they reach your workspace.
+
+If the doctor comes back clean but something still looks off, the manual checks below cover the usual suspects.
+
 **Jobs pile up in the `failed_jobs` table.** Check the exception: if it's `401` / `403`, your `OWLOGS_API_KEY` is wrong or the key was rotated — regenerate it from your workspace and update `.env`.
 
 **Logs never arrive.** Run `php artisan queue:work` — without a worker, the dispatched `ShipBufferedLogsJob` will never execute and rows pile up in the store. Also verify `OWLOGS_API_KEY` is set (empty key = silent no-op), and that `LOG_CHANNEL=stack` (or `LOG_CHANNEL=owlogs`) — if `LOG_CHANNEL` points to a non-stack channel (e.g. `single`), the auto-registered `owlogs` entry in `stack` is bypassed.
@@ -458,7 +471,10 @@ A non-zero `LLEN` with no ship job in the queue usually means the cache marker i
 
 ## Security
 
-- **Redaction** is automatic for request body keys matching `password`, `password_confirmation`, `current_password`, `secret`, `token`, `key`, `authorization`, `cookie`, `credit_card`. Extend the list in `Middleware/AddLogContext.php` if you need more.
+- **Redaction** is centralised in `config('owlogs.redaction')` and applied to everything the agent captures: request input, log context/extra, Livewire call params and model-change attributes. Never edit vendor files — publish the config and extend the lists:
+  - `key_patterns` — case-insensitive substrings matched against array keys. Defaults: `password`, `secret`, `token`, `key`, `authorization`, `cookie`, `credit_card`, `two_factor`. A matching key has its whole value (nested arrays included) replaced by `mask` (default `********`).
+  - `value_regexes` — PCRE patterns applied to every captured string value regardless of its key; each match is replaced by `mask`. Useful for secrets hiding inside free text, e.g. `'/\b\d{16}\b/'` for card numbers. Empty by default.
+- **Sampling** (`config('owlogs.sampling')`) trims volume before anything is buffered or shipped: `levels` sets a per-level keep probability (`OWLOGS_SAMPLE_DEBUG=0.1` keeps 10 % of debug rows), and `traces` maps URI patterns to trace-level sample rates — the decision is derived from the `trace_id`, so a kept trace keeps all its rows and a dropped trace disappears entirely.
 - **HTTPS**: traffic is sent over TLS to `https://www.owlogs.com` with Laravel's default HTTP client verification.
 - **Authentication**: every request carries the `X-Api-Key` header. Rotate the key from your workspace and update `OWLOGS_API_KEY` to invalidate.
 - **No global state**: all tracing IDs live in Laravel's `Context` which is reset between requests / jobs.

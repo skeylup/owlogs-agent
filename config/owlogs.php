@@ -136,11 +136,19 @@ return [
         |    Stops the agent from dumping a 1-hour backlog onto the server
         |    in one burst once shipments recover. Set to 0 to disable.
         |
+        |  - retry_max_age_s: drain-time TTL applied INSTEAD of max_age_s
+        |    while inside an outage/recovery window (circuit tripped, or
+        |    its cooldown recently elapsed). Rows retained through a 429 /
+        |    outage would all be older than the default 60s — this wider
+        |    window (default 600s) lets the retained error/critical backlog
+        |    ship on recovery instead of being wiped as stale.
+        |
         */
 
         'buffer' => [
             'max_rows' => env('OWLOGS_BUFFER_MAX_ROWS', 5000),
             'max_age_s' => env('OWLOGS_BUFFER_MAX_AGE_S', 60),
+            'retry_max_age_s' => env('OWLOGS_BUFFER_RETRY_MAX_AGE_S', 600),
         ],
 
         /*
@@ -152,9 +160,18 @@ return [
         | a fatal status (403 = no subscription, 429 = quota exhausted).
         | While the breaker is tripped:
         |
-        |  - RemoteHandler::write() drops new records without buffering.
-        |  - flush() discards the in-memory batch without storing it.
-        |  - ShipBufferedLogsJob exits early after wiping the backlog.
+        |  - RemoteHandler::write() drops new records BELOW
+        |    `retain_min_level` (default error); error/critical rows keep
+        |    buffering within the store's FIFO `max_rows` cap so the
+        |    high-signal slice survives the outage (the server keeps
+        |    accepting it on a quota grace budget).
+        |  - flush() persists only the retained-severity slice to the store.
+        |  - ShipBufferedLogsJob exits early but KEEPS the spool; on 429 the
+        |    failed chunk is requeued instead of wiped.
+        |
+        | Every record dropped during the cooldown is tallied; the first
+        | ship after recovery emits ONE synthetic WARNING row with the drop
+        | counts so the gap is visible server-side.
         |
         | The breaker auto-rearms after `cooldown_s` — a tenant who
         | upgrades / pays for more quota recovers on their own without
@@ -165,6 +182,7 @@ return [
         'circuit' => [
             'enabled' => env('OWLOGS_CIRCUIT_ENABLED', true),
             'cooldown_s' => env('OWLOGS_CIRCUIT_COOLDOWN_S', 300),
+            'retain_min_level' => env('OWLOGS_CIRCUIT_RETAIN_MIN_LEVEL', 'error'),
         ],
 
         'octane' => [
@@ -395,6 +413,117 @@ return [
     */
 
     'ignored_jobs' => [],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Redaction
+    |--------------------------------------------------------------------------
+    |
+    | Central PII scrubbing for everything the agent captures: request input,
+    | log context/extra, Livewire call params and model-change attributes.
+    | Publish this config and extend the lists here — never edit vendor files.
+    |
+    |  - `key_patterns`: case-insensitive substrings matched against array
+    |    keys (request fields, context keys, model attribute names, ...).
+    |    A matching key has its whole value — nested arrays included —
+    |    replaced by `mask`. Defaults are the union of the lists that used
+    |    to be hardcoded in AddLogContext, AutoLogger and OwlogsLivewireHook.
+    |
+    |  - `value_regexes`: PCRE patterns applied to every captured string
+    |    VALUE regardless of its key; each match is replaced by `mask`.
+    |    Useful for secrets hiding inside free text, e.g. '/\b\d{16}\b/'
+    |    for card numbers. Empty by default.
+    |
+    */
+
+    'redaction' => [
+        'key_patterns' => [
+            'password',
+            'secret',
+            'token',
+            'key',
+            'authorization',
+            'cookie',
+            'credit_card',
+            'two_factor',
+        ],
+        'value_regexes' => [],
+        'mask' => '********',
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Sampling
+    |--------------------------------------------------------------------------
+    |
+    | Volume dials enforced in the Monolog handler BEFORE buffering — a
+    | sampled-out record never reaches the buffer, the store or the wire.
+    |
+    |  - `levels`: per-level keep probability between 0.0 (drop everything)
+    |    and 1.0 (keep everything, the default). Lets busy apps keep a slice
+    |    of debug/info noise while retaining every warning and error.
+    |
+    |  - `traces`: per-URI-pattern TRACE sampling ('pattern' => rate).
+    |    Patterns match the request path with Str::is wildcards (same
+    |    convention as `ignored_uris`); the first match wins. The decision
+    |    is derived deterministically from the trace_id, so a kept trace
+    |    keeps ALL its rows (queue jobs included) and a dropped trace
+    |    disappears entirely — never half a trace.
+    |
+    |      'traces' => [
+    |          'api/polling/*' => 0.05,
+    |          'up' => 0.0,
+    |      ],
+    |
+    */
+
+    'sampling' => [
+        'levels' => [
+            'debug' => env('OWLOGS_SAMPLE_DEBUG', 1.0),
+            'info' => env('OWLOGS_SAMPLE_INFO', 1.0),
+            'notice' => env('OWLOGS_SAMPLE_NOTICE', 1.0),
+            'warning' => env('OWLOGS_SAMPLE_WARNING', 1.0),
+            'error' => env('OWLOGS_SAMPLE_ERROR', 1.0),
+            'critical' => env('OWLOGS_SAMPLE_CRITICAL', 1.0),
+            'alert' => env('OWLOGS_SAMPLE_ALERT', 1.0),
+            'emergency' => env('OWLOGS_SAMPLE_EMERGENCY', 1.0),
+        ],
+        'traces' => [],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Error-storm deduplication
+    |--------------------------------------------------------------------------
+    |
+    | Two protections applied at buffer time — both preserve exact occurrence
+    | statistics through the `count` / `suppressed_count` row fields, which
+    | the server maps back into issue tallies:
+    |
+    |  - Window collapse (`enabled`): within one flush window, rows with the
+    |    same fingerprint (level + exception class + caller file:line +
+    |    message + user) merge into a single row carrying `count` plus
+    |    `first_at` / `last_at` timestamps. Pure in-memory, zero I/O cost,
+    |    applies to every level. State resets on each flush, so nothing
+    |    leaks across requests under Octane.
+    |
+    |  - Per-fingerprint rate cap: fingerprints at or above `cap_min_level`
+    |    are additionally metered across flush windows (Cache-backed, so the
+    |    cap holds across FPM processes and Octane workers). Once a
+    |    fingerprint has shipped `max_per_minute` rows within a minute,
+    |    further occurrences are suppressed and only one sampled row per
+    |    `sample_interval_s` goes out, carrying the accumulated
+    |    `suppressed_count`. Levels below `cap_min_level` skip the Cache
+    |    metering entirely to keep the happy path free of extra I/O.
+    |
+    */
+
+    'dedup' => [
+        'enabled' => env('OWLOGS_DEDUP_ENABLED', true),
+        'cap_min_level' => env('OWLOGS_DEDUP_CAP_MIN_LEVEL', 'warning'),
+        'max_per_minute' => env('OWLOGS_DEDUP_MAX_PER_MINUTE', 60),
+        'sample_interval_s' => env('OWLOGS_DEDUP_SAMPLE_INTERVAL_S', 30),
+    ],
 
     /*
     |--------------------------------------------------------------------------

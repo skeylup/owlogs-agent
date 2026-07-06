@@ -10,6 +10,8 @@ use Monolog\LogRecord;
 use Skeylup\OwlogsAgent\Flushing\EndOfRequestPolicy;
 use Skeylup\OwlogsAgent\Flushing\FlushPolicy;
 use Skeylup\OwlogsAgent\Handlers\Concerns\BuffersAndShips;
+use Skeylup\OwlogsAgent\Support\Redactor;
+use Skeylup\OwlogsAgent\Support\Sampler;
 use Skeylup\OwlogsAgent\Transport\InMemoryLogBufferStore;
 use Skeylup\OwlogsAgent\Transport\LogBufferStore;
 
@@ -38,13 +40,21 @@ class RemoteHandlerV3 extends AbstractProcessingHandler implements RemoteHandler
 
     protected function write(LogRecord $record): void
     {
+        // Sampling gate — BEFORE buffering, so a sampled-out record never
+        // costs buffer memory, store I/O or wire bytes.
+        if (! app(Sampler::class)->shouldKeep($record->level->getName())) {
+            return;
+        }
+
+        $redactor = app(Redactor::class);
+
         $this->bufferOne(
             channel: $record->channel,
             levelValue: $record->level->value,
             levelName: $record->level->getName(),
             message: $record->message,
-            context: $record->context,
-            extra: $record->extra,
+            context: $redactor->redact($record->context),
+            extra: $redactor->redact($record->extra),
             datetime: $record->datetime,
         );
     }

@@ -10,6 +10,8 @@ use Monolog\Logger;
 use Skeylup\OwlogsAgent\Flushing\EndOfRequestPolicy;
 use Skeylup\OwlogsAgent\Flushing\FlushPolicy;
 use Skeylup\OwlogsAgent\Handlers\Concerns\BuffersAndShips;
+use Skeylup\OwlogsAgent\Support\Redactor;
+use Skeylup\OwlogsAgent\Support\Sampler;
 use Skeylup\OwlogsAgent\Transport\InMemoryLogBufferStore;
 use Skeylup\OwlogsAgent\Transport\LogBufferStore;
 
@@ -45,13 +47,23 @@ class RemoteHandlerV2 extends AbstractProcessingHandler implements RemoteHandler
      */
     protected function write(array $record): void
     {
+        $levelName = (string) ($record['level_name'] ?? 'INFO');
+
+        // Sampling gate — BEFORE buffering, so a sampled-out record never
+        // costs buffer memory, store I/O or wire bytes.
+        if (! app(Sampler::class)->shouldKeep($levelName)) {
+            return;
+        }
+
+        $redactor = app(Redactor::class);
+
         $this->bufferOne(
             channel: (string) ($record['channel'] ?? 'app'),
             levelValue: (int) ($record['level'] ?? 200),
-            levelName: (string) ($record['level_name'] ?? 'INFO'),
+            levelName: $levelName,
             message: (string) ($record['message'] ?? ''),
-            context: is_array($record['context'] ?? null) ? $record['context'] : [],
-            extra: is_array($record['extra'] ?? null) ? $record['extra'] : [],
+            context: $redactor->redact(is_array($record['context'] ?? null) ? $record['context'] : []),
+            extra: $redactor->redact(is_array($record['extra'] ?? null) ? $record['extra'] : []),
             datetime: $record['datetime'] instanceof \DateTimeInterface
                 ? $record['datetime']
                 : new DateTimeImmutable,
