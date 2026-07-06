@@ -37,9 +37,12 @@ final class ShipBufferedLogsRetrying extends \RuntimeException {}
  * collapse to a single queued job. This job releases that marker
  * (Cache::pull) in handle() so a subsequent flush can re-arm it.
  *
- * Retries (3 × [5s, 30s, 120s]) apply to the HTTP POST — rows already
- * drained from the store are held in the job payload, so a retry ships
- * the same batch again (at-least-once, never lost on transient 5xx).
+ * Retries (3 × [5s, 30s, 120s]) apply to the HTTP POST. Rows are drained
+ * from the store into a LOCAL batch — the job carries no payload — so on a
+ * transient failure {@see self::sendAll()} appends the unsent chunks back
+ * onto the store before the job is released; the released retry re-drains
+ * and reships them (at-least-once on transient 5xx / timeout / network,
+ * bounded by the store's FIFO `max_rows` cap).
  */
 class ShipBufferedLogsJob implements ShouldQueue
 {
@@ -284,7 +287,22 @@ class ShipBufferedLogsJob implements ShouldQueue
                 return;
             }
 
-            $this->sendChunk($chunk, $apiKey, $store);
+            try {
+                $this->sendChunk($chunk, $apiKey, $store);
+            } catch (Throwable $e) {
+                // Transient failure (5xx / timeout / network): sendChunk has
+                // released the job for a retry, or is re-throwing on the final
+                // attempt. runShip() drained these rows into a local array and
+                // the job carries no payload — so unless we put them back, the
+                // released retry re-drains only FRESH rows and this batch (the
+                // failing chunk plus every not-yet-attempted chunk) is lost.
+                // Requeue the unsent tail so the retry reships it. The 429/403
+                // paths handle their own spool and return without throwing, so
+                // they never reach here (no double-requeue).
+                $this->requeueChunks(array_slice($chunks, $index), $store);
+
+                throw $e;
+            }
         }
     }
 

@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.23] - 2026-07-06
+
 ### Fixed
+- **Silent buffered-log loss under ship-queue lag.** `transport.buffer.max_age_s` now defaults to `0` (disabled) instead of `60`. The old default was a drain-time guillotine measured from `logged_at`, but the nominal store→ship latency (`ship.debounce_ms` + queue wait + up to the 120s retry backoff) routinely exceeds 60s, so every drain silently discarded the oldest — usually the majority — of the batch whenever the ship queue fell even slightly behind. Storage is still bounded by the FIFO `max_rows` cap; a genuine post-outage backlog is still bounded by `retry_max_age_s` (recovery window only). Set `OWLOGS_BUFFER_MAX_AGE_S` explicitly only if you want a hard nominal cutoff sized above your worst-case ship latency.
+- **`ShipBufferedLogsJob` lost the in-flight batch on transient failure.** Rows are drained into a local array and the job carries no payload, yet on a 5xx / timeout / network error the job was released for a retry without putting them back — so the retry re-drained only fresh rows and the failed batch was lost (contradicting the "at-least-once" docblock). The unsent chunks (failing + not-yet-attempted) are now appended back onto the store before release, so the retry reships them (bounded by the FIFO `max_rows` cap).
 - Telescope's `ProcessPendingUpdates` (and any `Laravel\Telescope\` job) is now treated as an internal job and never auto-logged. It was dispatched during the agent's own `ShipBufferedLogsJob` terminating phase — after `handle()`'s suppression window had closed — which tagged that span with `job_class=ShipBufferedLogsJob` and mislabelled the whole parent trace (e.g. a scheduled `artisan` command appeared as `ShipBufferedLogsJob`). Apps running Telescope alongside the agent now keep correctly-titled traces.
 
 ### Added

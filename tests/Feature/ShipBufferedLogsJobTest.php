@@ -55,6 +55,21 @@ it('self re-dispatches when the store has more rows than batch_count', function 
     Bus::assertDispatchedTimes(ShipBufferedLogsJob::class, 1);
 });
 
+it('does not drop late rows by default (nominal max_age_s disabled)', function (): void {
+    // Regression guard for the buffer.max_age_s default flip (60 → 0). With
+    // the old 60s default, any row that sat in the pipeline longer than 60s
+    // (normal under ship-queue lag) was silently guillotined at drain time.
+    // The default is now 0, so a 10-minute-old row still ships.
+    $this->store->append([
+        ['message' => 'late', 'logged_at' => gmdate('Y-m-d H:i:s.0', time() - 600)],
+    ]);
+
+    (new ShipBufferedLogsJob)->handle($this->store);
+
+    expect($this->store->size())->toBe(0);
+    Http::assertSentCount(1); // old default would have dropped it → nothing sent
+});
+
 it('is a no-op when the store is empty', function (): void {
     Bus::fake();
 

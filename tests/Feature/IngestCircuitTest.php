@@ -92,6 +92,10 @@ it('does NOT trip the circuit on a 5xx transient error', function (): void {
     }
 
     expect(IngestCircuit::isTripped())->toBeFalse();
+    // Regression: the drained batch is requeued on a transient failure so the
+    // released retry can reship it. Without the requeue, runShip() drains into
+    // a local array the job never carries, and the row is silently lost.
+    expect($this->store->size())->toBe(1);
 });
 
 it('ShipBufferedLogsJob exits early and KEEPS the spool when circuit is already tripped', function (): void {

@@ -131,23 +131,34 @@ return [
         |    outage or a tripped circuit. Set to 0 to disable the cap
         |    (legacy unbounded behaviour).
         |
-        |  - max_age_s: drain-time TTL. Rows whose `logged_at` is older
-        |    than this many seconds are filtered out before the HTTP POST.
-        |    Stops the agent from dumping a 1-hour backlog onto the server
-        |    in one burst once shipments recover. Set to 0 to disable.
+        |  - max_age_s: drain-time TTL for NOMINAL operation. Rows whose
+        |    `logged_at` is older than this many seconds are filtered out
+        |    before the HTTP POST. DISABLED by default (0), and that is the
+        |    right default: the store→ship latency in healthy operation is
+        |    already `ship.debounce_ms` + queue wait + up to the retry
+        |    backoff (120s), so any small positive value silently guillotines
+        |    the oldest — and usually the MAJORITY — of every drain the moment
+        |    the ship queue is even slightly behind. Storage is bounded by the
+        |    FIFO `max_rows` cap; the post-outage burst is bounded by
+        |    `retry_max_age_s`. Leave at 0 unless you deliberately want a hard
+        |    nominal age cutoff AND have sized it well above your worst-case
+        |    ship latency.
         |
         |  - retry_max_age_s: drain-time TTL applied INSTEAD of max_age_s
         |    while inside an outage/recovery window (circuit tripped, or
-        |    its cooldown recently elapsed). Rows retained through a 429 /
-        |    outage would all be older than the default 60s — this wider
-        |    window (default 600s) lets the retained error/critical backlog
-        |    ship on recovery instead of being wiped as stale.
+        |    its cooldown recently elapsed). This is what bounds a stale
+        |    backlog dump after a real outage — so max_age_s does not need
+        |    to (and must not) do that job in the nominal path. Rows retained
+        |    through a 429 / outage ship on recovery within this wider window
+        |    (default 600s) instead of being wiped as stale.
         |
         */
 
         'buffer' => [
             'max_rows' => env('OWLOGS_BUFFER_MAX_ROWS', 5000),
-            'max_age_s' => env('OWLOGS_BUFFER_MAX_AGE_S', 60),
+            // Default 0 (disabled). See the note above: a positive nominal
+            // age cutoff drops late-but-valid rows under any ship-queue lag.
+            'max_age_s' => env('OWLOGS_BUFFER_MAX_AGE_S', 0),
             'retry_max_age_s' => env('OWLOGS_BUFFER_RETRY_MAX_AGE_S', 600),
         ],
 
