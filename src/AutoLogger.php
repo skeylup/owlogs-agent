@@ -12,6 +12,7 @@ use Illuminate\Auth\Events\Verified;
 use Illuminate\Cache\Events\CacheHit;
 use Illuminate\Cache\Events\CacheMissed;
 use Illuminate\Console\Events\ScheduledTaskFailed;
+use Illuminate\Contracts\Support\Arrayable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Events\MigrationEnded;
 use Illuminate\Database\Events\QueryExecuted;
@@ -299,7 +300,7 @@ class AutoLogger
                 Log::channel('owlogs')?->info('notification.sent: '.class_basename($event->notification).' via '.$event->channel, [
                     'notification' => get_class($event->notification),
                     'notifiable_type' => get_class($event->notifiable),
-                    'notifiable_id' => $event->notifiable->getKey(),
+                    'notifiable_id' => $this->extractNotifiableId($event->notifiable),
                 ]);
             });
         }
@@ -309,11 +310,74 @@ class AutoLogger
                 Log::channel('owlogs')?->error('notification.failed: '.class_basename($event->notification).' via '.$event->channel, [
                     'notification' => get_class($event->notification),
                     'notifiable_type' => get_class($event->notifiable),
-                    'notifiable_id' => $event->notifiable->getKey(),
-                    'error' => $event->data['message'] ?? $event->data['error'] ?? 'unknown',
+                    'notifiable_id' => $this->extractNotifiableId($event->notifiable),
+                    'error' => $this->extractNotificationError($event->data),
                 ]);
             });
         }
+    }
+
+    /**
+     * Notifiables are not always Eloquent models: `Notification::route()` builds
+     * an AnonymousNotifiable, which has no key at all.
+     */
+    private function extractNotifiableId(mixed $notifiable): int|string|null
+    {
+        if (! is_object($notifiable) || ! method_exists($notifiable, 'getKey')) {
+            return null;
+        }
+
+        $key = $notifiable->getKey();
+
+        return is_int($key) || is_string($key) ? $key : null;
+    }
+
+    /**
+     * `NotificationFailed::$data` is channel-defined and untyped. Most first-party
+     * channels push an array, but others push a value object (Expo's ExpoError),
+     * an exception, or a plain string — so array access must never be assumed,
+     * it fatals with "Cannot use object of type X as array" and kills the job
+     * that was merely reporting a failed notification.
+     */
+    private function extractNotificationError(mixed $data): string
+    {
+        if ($data instanceof \Throwable) {
+            return $data->getMessage();
+        }
+
+        if ($data instanceof Arrayable) {
+            $data = $data->toArray();
+        } elseif ($data instanceof \JsonSerializable) {
+            $data = $data->jsonSerialize();
+        } elseif (is_object($data)) {
+            $data = get_object_vars($data);
+        }
+
+        if (is_array($data)) {
+            foreach (['message', 'error', 'reason', 'description'] as $key) {
+                $value = $data[$key] ?? null;
+
+                if (is_string($value) && $value !== '') {
+                    return $value;
+                }
+
+                if (is_scalar($value)) {
+                    return (string) $value;
+                }
+
+                if (is_object($value) && method_exists($value, '__toString')) {
+                    return (string) $value;
+                }
+            }
+
+            return 'unknown';
+        }
+
+        if (is_string($data)) {
+            return $data !== '' ? $data : 'unknown';
+        }
+
+        return is_scalar($data) ? (string) $data : 'unknown';
     }
 
     // ── Database ─────────────────────────────────────────────────────────
