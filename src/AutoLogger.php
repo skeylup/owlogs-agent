@@ -338,8 +338,11 @@ class AutoLogger
      * an exception, or a plain string — so array access must never be assumed,
      * it fatals with "Cannot use object of type X as array" and kills the job
      * that was merely reporting a failed notification.
+     *
+     * The payload is normalised to an array when possible; when no usable
+     * message can be read out of it, `null` is returned rather than guessing.
      */
-    private function extractNotificationError(mixed $data): string
+    private function extractNotificationError(mixed $data): ?string
     {
         if ($data instanceof \Throwable) {
             return $data->getMessage();
@@ -353,31 +356,38 @@ class AutoLogger
             $data = get_object_vars($data);
         }
 
-        if (is_array($data)) {
-            foreach (['message', 'error', 'reason', 'description'] as $key) {
-                $value = $data[$key] ?? null;
+        if (! is_array($data)) {
+            return $this->stringifyNotificationError($data);
+        }
 
-                if (is_string($value) && $value !== '') {
-                    return $value;
-                }
+        foreach (['message', 'error', 'reason', 'description'] as $key) {
+            $value = $this->stringifyNotificationError($data[$key] ?? null);
 
-                if (is_scalar($value)) {
-                    return (string) $value;
-                }
-
-                if (is_object($value) && method_exists($value, '__toString')) {
-                    return (string) $value;
-                }
+            if ($value !== null) {
+                return $value;
             }
-
-            return 'unknown';
         }
 
-        if (is_string($data)) {
-            return $data !== '' ? $data : 'unknown';
+        return null;
+    }
+
+    /**
+     * Only scalars and stringable objects can become an error message; empty
+     * values count as missing so the next candidate key gets a chance.
+     */
+    private function stringifyNotificationError(mixed $value): ?string
+    {
+        if (is_object($value) && method_exists($value, '__toString')) {
+            $value = (string) $value;
         }
 
-        return is_scalar($data) ? (string) $data : 'unknown';
+        if (! is_scalar($value)) {
+            return null;
+        }
+
+        $value = (string) $value;
+
+        return $value !== '' ? $value : null;
     }
 
     // ── Database ─────────────────────────────────────────────────────────

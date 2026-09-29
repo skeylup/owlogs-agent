@@ -7,8 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.24] - 2026-09-29
+
 ### Fixed
-- **`notification.failed` auto-log fataled on channels that report a non-array payload.** `NotificationFailed::$data` is channel-defined and untyped; the listener read it as `$event->data['message'] ?? ...`, so a channel passing a value object (e.g. `NotificationChannels\Expo\ExpoError`), an exception, or a string killed the listener with `Error: Cannot use object of type ... as array` — and, because listeners run inside `SendQueuedNotifications`, failed the queued notification job that was merely reporting a delivery failure. The payload is now unwrapped defensively (Throwable, `Arrayable`, `JsonSerializable`, plain object, string, array) and falls back to `unknown`.
+- **`notification.failed` auto-log fataled on channels that report a non-array payload.** `NotificationFailed::$data` is channel-defined and untyped; the listener read it as `$event->data['message'] ?? ...`, so a channel passing a value object (e.g. `NotificationChannels\Expo\ExpoError`), an exception, or a string killed the listener with `Error: Cannot use object of type ... as array` — and, because listeners run inside `SendQueuedNotifications`, failed the queued notification job that was merely reporting a delivery failure. The payload is now unwrapped defensively (Throwable, `Arrayable`, `JsonSerializable`, plain object, string, array); when no usable message can be read, `error` is logged as `null` instead of a made-up value.
 - `notification.sent` / `notification.failed` no longer assume the notifiable is an Eloquent model: on-demand notifications (`Notification::route()`) pass an `AnonymousNotifiable`, which has no `getKey()`. `notifiable_id` is now `null` for those instead of throwing.
 
 ## [1.0.23] - 2026-07-06

@@ -78,13 +78,31 @@ it('still reads the message out of the array payload most channels send', functi
     expect(json_decode((string) $rows[0]['context'], true))->toMatchArray(['error' => 'gateway refused']);
 });
 
-it('falls back to the error key, then to unknown', function (): void {
+it('falls back to the error key, then to null', function (): void {
     $rows = dispatchFailedNotification(new KeyedTestNotifiable, ['error' => 'invalid number']);
     expect(json_decode((string) $rows[0]['context'], true))->toMatchArray(['error' => 'invalid number']);
 
     $rows = dispatchFailedNotification(new KeyedTestNotifiable, ['status' => 500]);
-    expect(json_decode((string) $rows[0]['context'], true))->toMatchArray(['error' => 'unknown']);
+    expect(json_decode((string) $rows[0]['context'], true))->toMatchArray(['error' => null]);
 });
+
+it('skips an empty message and tries the next key', function (): void {
+    $rows = dispatchFailedNotification(new KeyedTestNotifiable, ['message' => '', 'error' => 'invalid number']);
+
+    expect(json_decode((string) $rows[0]['context'], true))->toMatchArray(['error' => 'invalid number']);
+});
+
+it('logs null for payloads it cannot read a message from, without fataling', function (mixed $data): void {
+    $rows = dispatchFailedNotification(new KeyedTestNotifiable, $data);
+
+    expect($rows)->toHaveCount(1);
+    expect(json_decode((string) $rows[0]['context'], true))->toMatchArray(['error' => null]);
+})->with([
+    'null' => [null],
+    'empty string' => [''],
+    'object without message' => [new ArrayObject],
+    'non-stringable message' => [['message' => ['nested' => 'x']]],
+]);
 
 it('unwraps an exception payload', function (): void {
     $rows = dispatchFailedNotification(new KeyedTestNotifiable, new RuntimeException('connection timed out'));
