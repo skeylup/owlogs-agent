@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.25] - 2026-11-24
+
+### Fixed
+
+- Truncate `caller_file` (512), `caller_method` (255) and `route_name` (255) to the API limits so one oversized value no longer gets the whole batch rejected (422).
+
 ## [1.0.24] - 2026-09-29
 
 ### Fixed

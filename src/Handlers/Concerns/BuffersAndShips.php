@@ -586,13 +586,13 @@ trait BuffersAndShips
             'message' => $message,
             'stacktrace' => $stacktrace,
 
-            'caller_file' => $extra['caller_file'] ?? null,
+            'caller_file' => $this->truncate($extra['caller_file'] ?? null, 512),
             'caller_line' => $extra['caller_line'] ?? null,
-            'caller_method' => $extra['caller_method'] ?? null,
+            'caller_method' => $this->truncate($extra['caller_method'] ?? null, 255),
 
             'uri' => $this->truncate($contextData['uri'] ?? null, 2048),
             'http_method' => $this->truncate($contextData['http_method'] ?? null, 8),
-            'route_name' => $contextData['route_name'] ?? null,
+            'route_name' => $this->truncate($contextData['route_name'] ?? null, 255),
             'route_action' => $this->truncate($contextData['route_action'] ?? null, 512),
             'ip' => $contextData['ip'] ?? null,
             'user_agent' => $this->truncate($contextData['user_agent'] ?? null, 512),
