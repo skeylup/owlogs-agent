@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Boost skills: the `owlogs-agent` skill is split into a short `SKILL.md` and `references/` files (Measure, HasLogContext, per-layer rules), and no longer assumes the host app uses a given tenancy package or auth stack.
+
+### Fixed
+
+- Boost skills: documented `auto_log` defaults now match `config/owlogs.php` (Livewire calls on by default, cache hits / misses off, `OWLOGS_AUTO_EVENT_DISPATCH` instead of a non-existent key); the `owlogs-mcp` skill reads the exhausted status as `whoami` returns it.
+
 ## [1.0.25] - 2026-11-24
 
 ### Fixed
