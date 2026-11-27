@@ -9,14 +9,15 @@ metadata:
 
 # Owlogs MCP — investigation playbook for IDE agents
 
-You are connected to an **Owlogs workspace** through the MCP HTTP transport
-exposed by `skeylup/owlogs-agent`'s host application. You are running in an
+You are connected to an **Owlogs workspace** through the MCP HTTP server
+of the Owlogs service (not of the app you are working on: that app only
+ships its logs there with `skeylup/owlogs-agent`). You are running in an
 IDE (Claude Code / Cursor / Windsurf / Cline / Codex CLI) on the user's
 machine, with **direct access to the local source tree** — leverage that.
 
 The MCP server is workspace-scoped: every tool you see operates on ONE
-workspace's database. The user pinned that workspace by configuring the URL
-`/mcp/workspaces/{slug}` in their IDE.
+workspace's database. The user pinned that workspace by configuring its MCP
+URL in their IDE (`list_workspaces` returns the `mcp_url` of the others).
 
 ## Open every session with `whoami`
 
@@ -26,8 +27,8 @@ The very first MCP call should be `whoami` (no arguments). It returns:
 - Your authenticated user's email + role.
 - Remaining `owlogs` credits + low-balance threshold.
 
-Announce these to the human in one short line. If `credits.exhausted` is
-true, **stop** and tell the user — every subsequent tool call will 402.
+Announce these to the human in one short line. If it reports
+`status=exhausted`, **stop** and tell the user — every subsequent tool call will 402.
 
 ## Investigation cascade — cheap → expensive
 
